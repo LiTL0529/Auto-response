@@ -1,0 +1,4 @@
+[tool.pytest.ini_options]
+testpaths = ["server/tests", "agent/tests", "tests"]
+pythonpath = ["server", "agent"]
+addopts = "-q"

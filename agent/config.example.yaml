@@ -1,0 +1,37 @@
+# 复制为 config.yaml 并修改。config.yaml 包含密钥，已在 .gitignore 中忽略。
+
+server_url: https://bot.example.com        # 云端服务器地址
+agent_token: 换成和服务器 AGENT_TOKEN 一样的值
+
+claude_path: claude          # 找不到时填完整路径，如 C:\Users\你\.local\bin\claude.exe
+claude_model: ""             # 留空使用 Claude Code 默认模型
+use_api_key: false           # false = 使用订阅账号登录（推荐）
+timeout_minutes: 60          # 单个需求 Claude 最长工作时间
+max_turns: 100
+log_dir: logs
+
+# 每个项目一段。建议给 Agent 单独 clone 一份项目，不要和你自己手动开发的目录混用。
+projects:
+  - id: shop-admin                       # 唯一标识（英文）
+    name: 商城后台                        # 朋友口中的叫法
+    aliases: [后台, 管理系统, 商城]        # 其他叫法，帮助大模型识别是哪个项目
+    description: Vue3 + Spring Boot 的商城管理后台，部署在阿里云
+    path: D:\projects\shop-admin
+    base_branch: main
+    test: npm run build                  # 改完后的校验命令，失败则不合并（可留空）
+    deploy: powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1   # 需要你在微信确认后才执行
+    url: https://admin.example.com       # 上线后告诉朋友的地址
+    notes: |
+      管理后台的 UI 统一用 Element Plus 组件。
+
+  - id: desktop-tool
+    name: 桌面客户端
+    aliases: [客户端, 桌面端, 安装包]
+    description: Electron 桌面工具
+    path: D:\projects\desktop-tool
+    base_branch: main
+    test: npm test
+    package: npm run dist                # 打包命令，自动执行
+    package_artifact: dist\*.exe         # 安装包位置（支持通配符）
+    package_on_change: false             # true = 每次改动都打包；false = 朋友要求时才打包
+    on_dirty: stash                      # 目录有未提交改动时：stash 自动暂存 / fail 拒绝执行

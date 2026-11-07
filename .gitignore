@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+# 运行数据和密钥：不要提交（仓库是公开的）
+data/
+logs/
+*.db
+.env
+agent/config.yaml

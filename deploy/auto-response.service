@@ -1,0 +1,16 @@
+[Unit]
+Description=Auto-response bridge server (WeCom -> Claude Code)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=bridge
+WorkingDirectory=/opt/auto-response/server
+EnvironmentFile=/opt/auto-response/deploy/.env
+# 必须单进程运行（消息合并、长轮询状态在内存里），不要加 --workers
+ExecStart=/opt/auto-response/.venv/bin/uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000 --proxy-headers
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
