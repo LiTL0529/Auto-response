@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from . import db as S
 from .db import Database
 from .files import FileStore
+from .textfmt import plain_text
 from .triage import Triage
 from .wecom.client import WeComAPIError, WeComClient
 
@@ -75,6 +76,7 @@ class Messenger:
         self.owner_uid = owner_uid
 
     async def send(self, uid: str, text: str) -> bool:
+        text = plain_text(text)  # 企业微信文本消息不渲染 Markdown
         channel, _, ident = uid.partition(":")
         try:
             if channel == "app":
