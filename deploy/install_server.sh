@@ -23,15 +23,29 @@ die()  { printf '\033[1;31m[错误] %s\033[0m\n' "$*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "请用 root 运行"
 [ -d "$APP/server" ] || die "没找到 $APP/server，请先 git clone 仓库到 $APP"
 
+# 宝塔面板：自带 nginx（/www/server/nginx）占用 80/443，且在 dnf.conf 里 exclude 了系统 nginx。
+# 这种情况下不装系统 nginx、不申请证书，只给宝塔里同名站点加一个反向代理扩展配置（复用站点证书）。
+BT_NGINX=/www/server/nginx/sbin/nginx
+BT_VHOST=/www/server/panel/vhost/nginx
+USE_BT=0
+if [ -x "$BT_NGINX" ] && [ -d "$BT_VHOST" ]; then
+    USE_BT=1
+    echo "检测到宝塔面板，将使用宝塔的 nginx"
+fi
+SYS_PKGS="git curl"
+[ "$USE_BT" = 1 ] || SYS_PKGS="nginx $SYS_PKGS"
+
 # ---------------------------------------------------------------- 系统依赖
 say "安装系统依赖"
 if command -v apt-get >/dev/null; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -q
-    apt-get install -y -q python3 python3-venv python3-pip nginx git curl
+    # shellcheck disable=SC2086
+    apt-get install -y -q python3 python3-venv python3-pip $SYS_PKGS
 elif command -v dnf >/dev/null || command -v yum >/dev/null; then
     PM=$(command -v dnf || command -v yum)
-    "$PM" install -y nginx git curl
+    # shellcheck disable=SC2086
+    "$PM" install -y $SYS_PKGS
     # Alibaba Cloud Linux 3 / CentOS 8 自带的 python3 是 3.6，装一个新版本
     for v in 3.12 3.11 3.9; do
         if "$PM" install -y "python$v" >/dev/null 2>&1 || "$PM" install -y "python${v/./}" >/dev/null 2>&1; then
@@ -74,6 +88,8 @@ if [ ! -f "$ENV_FILE" ]; then
         -e "s|^AGENT_TOKEN=.*|AGENT_TOKEN=$TOKEN|" \
         -e "s|^PUBLIC_BASE_URL=.*|PUBLIC_BASE_URL=https://$DOMAIN|" \
         -e "s|^DATA_DIR=.*|DATA_DIR=$APP/data|" \
+        -e "s|^WECOM_CORP_ID=ww0\+[[:space:]]|WECOM_CORP_ID= |" \
+        -e "s|^DASHSCOPE_API_KEY=sk-x\+.*|DASHSCOPE_API_KEY=|" \
         "$ENV_FILE"
     echo "已生成 $ENV_FILE（AGENT_TOKEN 已随机生成）"
 else
@@ -101,7 +117,51 @@ else
     warn "填好后运行：systemctl restart auto-response"
 fi
 
-# ---------------------------------------------------------------- Nginx
+# ---------------------------------------------------------------- Nginx（宝塔）
+if [ "$USE_BT" = 1 ]; then
+    say "配置宝塔 nginx"
+    BT_SITE="$BT_VHOST/$DOMAIN.conf"
+    BT_EXT="$BT_VHOST/extension/$DOMAIN"
+    if [ ! -f "$BT_SITE" ]; then
+        die "宝塔里还没有站点 $DOMAIN：请在宝塔面板 → 网站 → 添加站点 $DOMAIN，并在 SSL 里申请证书后重新运行本脚本"
+    fi
+    grep -q 'listen 443' "$BT_SITE" || warn "宝塔站点 $DOMAIN 还没开 HTTPS（企业微信回调需要 https），请在宝塔面板 → 网站 → SSL 申请证书"
+    grep -q "extension/$DOMAIN/" "$BT_SITE" || warn "$BT_SITE 里没有 include extension 目录，下面的配置不会生效"
+    mkdir -p "$BT_EXT"
+    # 用 ^~ / = 匹配，避免宝塔站点里的「敏感文件」正则 location（如 *.log、requirements.txt）拦截下载链接
+    cat > "$BT_EXT/auto-response.conf" <<'EOF'
+# Auto-response（企业微信需求助手），由 /opt/auto-response/deploy/install_server.sh 生成
+# 程序在 /opt/auto-response，systemd 服务 auto-response，只监听 127.0.0.1:8000
+location ^~ /wecom/     { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
+location ^~ /api/agent/ { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
+location ^~ /files/     { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
+location = /healthz     { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
+EOF
+    cat > "$BT_VHOST/extension/auto-response-proxy.inc" <<'EOF'
+proxy_pass http://127.0.0.1:8000;
+proxy_http_version 1.1;
+proxy_set_header Host $host;
+proxy_set_header Connection "";
+proxy_set_header X-Real-IP $remote_addr;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_request_buffering off;
+proxy_buffering off;
+proxy_read_timeout 120s;
+client_max_body_size 2g;
+add_header X-Robots-Tag "noindex" always;
+EOF
+    if "$BT_NGINX" -t; then
+        "$BT_NGINX" -s reload
+        echo "已写入 $BT_EXT/auto-response.conf 并重载宝塔 nginx"
+    else
+        rm -f "$BT_EXT/auto-response.conf"
+        die "宝塔 nginx 配置检查失败，已撤销 auto-response.conf"
+    fi
+fi
+
+# ---------------------------------------------------------------- Nginx（系统）
+if [ "$USE_BT" = 0 ]; then
 say "配置 Nginx"
 CONF=/etc/nginx/conf.d/auto-response.conf
 CERT_DIR=/etc/letsencrypt/live/$DOMAIN
@@ -171,6 +231,7 @@ EOF
         warn "处理后重新运行本脚本即可"
     fi
 fi
+fi  # USE_BT = 0
 
 # ---------------------------------------------------------------- 检查
 say "检查"
