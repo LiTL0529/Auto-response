@@ -232,3 +232,26 @@ def test_config_loading(tmp_path):
     cfg_file.write_text(f"server_url: x\nagent_token: x\nprojects:\n  - id: a\n    path: {tmp_path / 'p'}\n    typo: 1\n", encoding="utf-8")
     with pytest.raises(ValueError, match="typo"):
         load_config(cfg_file)
+
+
+def test_query_runs_read_only_without_git_changes(repo, monkeypatch):
+    r, _, tmp = repo
+    monkeypatch.setenv("FAKE_CLAUDE_MODE", "query")
+    head = git(r, "rev-parse", "HEAD")
+    res = make_runner(repo, FakeAPI(), query="bash D:/q.sh").run(job(kind="query", title="查询登录记录", requirement="查 wengao1 登录"))
+    assert res["ok"] and res["summary"] == "按钮已改为蓝色"
+    call = json.loads((tmp / "args.json").read_text(encoding="utf-8"))
+    a = call["args"]
+    assert a[a.index("--permission-mode") + 1] == "default"
+    allowed = a[a.index("--allowedTools") + 1].split(",")
+    assert "Bash(bash D:/q.sh *)" in allowed and "Edit" not in allowed and "Write" not in allowed
+    disallowed = a[a.index("--disallowedTools") + 1].split(",")
+    assert {"Edit", "Write", "MultiEdit"} <= set(disallowed)
+    assert "bash D:/q.sh" in call["prompt"] and "Markdown" in call["prompt"]
+    assert git(r, "rev-parse", "HEAD") == head and git(r, "branch", "--show-current") == "main"
+    assert git(r, "branch", "--list", "claude/*") == ""
+
+
+def test_query_without_config_is_refused(repo):
+    res = make_runner(repo, FakeAPI()).run(job(kind="query"))
+    assert not res["ok"] and "query" in res["error"]

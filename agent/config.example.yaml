@@ -22,6 +22,10 @@ projects:
     test: npm run build                  # 改完后的校验命令，失败则不合并（可留空）
     deploy: powershell -ExecutionPolicy Bypass -File scripts\deploy.ps1   # 需要你在微信确认后才执行
     url: https://admin.example.com       # 上线后告诉朋友的地址
+    # 可选：只读查询线上数据（负责人在微信里问「查一下 xx 的登录记录」时用）。Claude 只能读代码和执行这个命令，不能改文件。
+    # 命令要自己保证只读，比如通过只读数据库账号 + 锁定为强制命令的 SSH 密钥。
+    # query: bash D:/projects/shop-query.sh
+    # query_notes: PostgreSQL；登录记录在 auth_sessions，操作记录在 audit_logs
     notes: |
       管理后台的 UI 统一用 Element Plus 组件。
 

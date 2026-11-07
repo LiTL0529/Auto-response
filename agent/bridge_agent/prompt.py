@@ -41,3 +41,26 @@ def build_prompt(job: dict, project: Project, attachments: list[str], extra: str
     if extra:
         parts.append("\n" + extra)
     return "\n".join(parts)
+
+
+def build_query_prompt(job: dict, project: Project) -> str:
+    """只读查询线上数据。结果原样发到企业微信，所以要纯文本、简短。"""
+    parts = [
+        f"负责人想查询项目「{project.name or project.id}」线上系统里的数据。你只需要查出结果并回答，不要修改任何代码或文件。",
+        f"\n## 查询 #{job['task_id']}：{job['title']}\n{job['requirement']}",
+    ]
+    if job.get("raw_messages"):
+        parts.append("\n## 负责人原话\n" + "\n".join(f"> {m}" for m in job["raw_messages"]))
+    if project.description or project.query_notes:
+        parts.append(f"\n## 项目说明\n{project.description}\n{project.query_notes}".rstrip())
+    rules = [
+        f"查询线上数据只能用这个命令：{project.query} \"SQL\"（只读，单条 SQL 30 秒超时）。不要尝试别的方式连接服务器或数据库。",
+        "当前目录是项目代码，可以用 Read / Grep 查看模型和表结构定义；也可以用 information_schema 查表结构。",
+        "每次查询都加 LIMIT（一般不超过 100 行），先确认表和字段，再查数据。时间字段多为 UTC，回答时换算成北京时间（UTC+8）。",
+        "部分敏感字段（密码哈希、登录令牌等）没有权限读取，遇到权限错误就换别的字段，不要试图绕过。",
+        "最后一条消息就是发给负责人的答案，会原样发到企业微信：用中文纯文本，不要 Markdown（不要 **、#、---、反引号、表格）。"
+        "先一句话给出结论，再分条列出关键记录（每条一行，如「2026-11-06 15:07 登录，IP 1.2.3.4」），最多 30 条，超出的说明总数。"
+        "查不到就直接说查不到，并说明查了哪些地方。不要写查询过程。",
+    ]
+    parts.append("\n## 要求\n" + "\n".join(f"{i}. {r}" for i, r in enumerate(rules, 1)))
+    return "\n".join(parts)

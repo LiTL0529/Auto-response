@@ -240,3 +240,49 @@ def test_file_upload_and_signed_download(env):
     path = url.replace("https://bot.example.com", "")
     d = client.get(path)
     assert d.status_code == 200 and d.content == b"MZ..."
+
+
+def _stub_triage(client, monkeypatch, **fields):
+    from app.triage import TriageResult
+
+    async def analyze(*args, **kwargs):
+        return TriageResult(**fields)
+
+    monkeypatch.setattr(client.app.state.core.dispatcher.triage, "analyze", analyze)
+
+
+def test_query_is_answered_without_code_or_deploy(env, monkeypatch):
+    client, fake, crypto = env
+    projects = [{"id": "shop", "name": "商城后台", "aliases": [], "description": "", "has_deploy": True, "has_query": True}]
+    client.post("/api/agent/hello", json={"projects": projects, "startup": True}, headers=AUTH)
+    owner = f"app:{OWNER}"
+    _stub_triage(client, monkeypatch, intent="query", project_id="shop", title="查询wengao1登录记录",
+                 requirement="查 wengao1 最近的登录记录")
+
+    push(client, crypto, app_text(OWNER, "查一下wengao1的登录日志", "q1"))
+    assert wait_for(lambda: any("只读查询" in m for m in fake.to(owner)))
+    job = client.get("/api/agent/jobs/next?wait=0", headers=AUTH).json()["job"]
+    assert job["kind"] == "query" and "wengao1" in job["requirement"]
+
+    client.post(f"/api/agent/jobs/{job['job_id']}/result",
+                json={"ok": True, "summary": "**wengao1** 最近登录 2 次：\n- 2026-11-06 15:07"}, headers=AUTH)
+    answer = [m for m in fake.to(owner) if "🔍" in m]
+    assert answer and "wengao1 最近登录 2 次" in answer[0] and "**" not in answer[0]
+    assert not any("同意" in m or "部署" in m for m in fake.to(owner))
+    assert client.get("/api/agent/jobs/next?wait=0", headers=AUTH).json()["job"] is None
+
+
+def test_query_rejected_for_friend_and_unsupported_project(env, monkeypatch):
+    client, fake, crypto = env
+    hello(client)  # 两个项目都没有 has_query
+    owner = f"app:{OWNER}"
+    _stub_triage(client, monkeypatch, intent="query", project_id="shop", title="查询数据", requirement="查订单数")
+    push(client, crypto, app_text(OWNER, "后台今天有多少订单", "q2"))
+    assert wait_for(lambda: any("还没有配置线上数据查询" in m for m in fake.to(owner)))
+    assert client.get("/api/agent/jobs/next?wait=0", headers=AUTH).json()["job"] is None
+
+    push(client, crypto, app_text(OWNER, "授权 app:lisi 李四", "q3"))
+    assert wait_for(lambda: any("李四" in m for m in fake.to(owner)))
+    push(client, crypto, app_text("lisi", "后台今天有多少订单", "q4"))
+    assert wait_for(lambda: any("只对负责人开放" in m for m in fake.to("app:lisi")))
+    assert client.get("/api/agent/jobs/next?wait=0", headers=AUTH).json()["job"] is None

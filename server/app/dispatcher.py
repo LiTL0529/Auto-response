@@ -186,8 +186,8 @@ class Dispatcher:
                 line += f"\n安装包：{self.files.signed_url(t['package_file_id'])}"
         return line
 
-    def enqueue_code_job(self, task: dict) -> dict:
-        job = self.db.create_job("code", task["project_id"], task_id=task["id"])
+    def enqueue_code_job(self, task: dict, kind: str = "code") -> dict:
+        job = self.db.create_job(kind, task["project_id"], task_id=task["id"])
         self.db.update_task(task["id"], status=S.QUEUED)
         self.job_event.set()
         return job
@@ -269,11 +269,49 @@ class Dispatcher:
                 await self.cancel_task(uid, target)
             else:
                 await self.msg.send(uid, "你目前没有进行中的任务。")
+        elif r.intent == "query":
+            await self.create_query_task(uid, r, texts)
         elif r.intent in ("new_task", "followup") and r.project_id or (r.intent == "followup" and r.related_task_id):
             await self.create_task_from_triage(uid, r, texts, attachments)
         else:
             reply = r.reply or "收到～如果是新需求，请说一下是哪个项目、具体要改什么。发「帮助」查看用法。"
             await self.msg.send(uid, reply)
+
+    async def create_query_task(self, uid: str, r, texts: list[str]) -> None:
+        """只读查询线上数据：不改代码、不建分支、不部署，结果直接回复。只对负责人开放（涉及用户数据）。"""
+        if not self.is_owner(uid):
+            await self.msg.send(uid, "查询线上数据只对负责人开放。如果需要，请直接联系负责人。")
+            return
+        projects = self.projects_for(uid)
+        project_id = r.project_id or (projects[0]["id"] if len(projects) == 1 else None)
+        project = next((p for p in projects if p["id"] == project_id), None)
+        if not project:
+            await self.msg.send(uid, "请问要查哪个项目的数据？")
+            return
+        if not project.get("has_query"):
+            await self.msg.send(uid, f"「{project.get('name') or project_id}」还没有配置线上数据查询，暂时只能处理改软件的需求。")
+            return
+        task = self.db.create_task(
+            uid=uid,
+            project_id=project_id,
+            title=r.title or "查询数据",
+            requirement=r.requirement or "\n".join(texts),
+            acceptance=[],
+            raw_messages=texts,
+            attachments=[],
+            risk="small",
+            wants_package=0,
+            related_task_id=None,
+            status=S.QUEUED,
+        )
+        job = self.enqueue_code_job(task, kind="query")
+        ahead = self.db.queue_position(job["id"])
+        tip = f"前面还有 {ahead} 个任务" if ahead else "马上开始"
+        offline = "" if self.agent_online() else "\n（家里电脑暂时离线，上线后会自动处理）"
+        await self.msg.send(
+            uid,
+            f"收到！#{task['id']}【{task['title']}】只读查询线上数据，不会改动系统，{tip}。\n要查的是：{task['requirement'][:300]}{offline}",
+        )
 
     async def create_task_from_triage(self, uid: str, r, texts: list[str], attachments: list[dict]) -> None:
         related = self.db.get_task(r.related_task_id) if r.related_task_id else None
@@ -524,8 +562,25 @@ class Dispatcher:
         self.db.finish_job(job_id, "done" if ok else "failed", result)
         if job["kind"] == "deploy":
             await self._deploy_result(job, result)
+        elif job["kind"] == "query":
+            await self._query_result(job, result)
         else:
             await self._code_result(job, result)
+
+    async def _query_result(self, job: dict, result: dict) -> None:
+        t = self.db.get_task(job["task_id"])
+        uid, tid, title = t["uid"], t["id"], t["title"]
+        fields = {"session_id": result.get("session_id", ""), "summary": (result.get("summary") or "")[:4000], "progress": ""}
+        if result.get("canceled"):
+            self.db.update_task(tid, status=S.CANCELED, **fields)
+            await self.msg.send(uid, f"查询 #{tid} 已停止。")
+            return
+        if not result.get("ok"):
+            self.db.update_task(tid, status=S.FAILED, error=(result.get("error") or "")[:4000], **fields)
+            await self.msg.send(uid, f"🔴 查询 #{tid}【{title}】没有完成：\n{(result.get('error') or '')[:1200]}")
+            return
+        self.db.update_task(tid, status=S.DONE, **fields)
+        await self.msg.send(uid, f"🔍 #{tid}【{title}】\n{fields['summary'] or '没有查到结果。'}")
 
     async def _code_result(self, job: dict, result: dict) -> None:
         t = self.db.get_task(job["task_id"])

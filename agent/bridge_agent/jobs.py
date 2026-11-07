@@ -12,9 +12,11 @@ from pathlib import Path
 from . import gitops, shell
 from .api import ServerAPI
 from .claude_runner import ClaudeRunner
-from .config import DEFAULT_ALLOWED_TOOLS, DEFAULT_DISALLOWED_TOOLS, Config, Project
+from .config import (
+    DEFAULT_ALLOWED_TOOLS, DEFAULT_DISALLOWED_TOOLS, QUERY_ALLOWED_TOOLS, QUERY_DISALLOWED_TOOLS, Config, Project,
+)
 from .gitops import GitError
-from .prompt import build_prompt
+from .prompt import build_prompt, build_query_prompt
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +35,8 @@ class JobRunner:
         try:
             if job["kind"] == "deploy":
                 result = self.run_deploy(job, project)
+            elif job["kind"] == "query":
+                result = self.run_query(job, project)
             else:
                 result = self.run_code(job, project)
         except Exception as e:  # noqa: BLE001
@@ -41,6 +45,28 @@ class JobRunner:
             self._back_to_base(project)
         result["duration_s"] = int(time.time() - start)
         return result
+
+    # ------------------------------------------------------------------ query
+    def run_query(self, job: dict, p: Project) -> dict:
+        """只读查询线上数据：Claude 只能读代码和执行 p.query，不能改文件，不建分支、不提交。"""
+        if not p.query:
+            return {"ok": False, "error": f"项目 {p.id} 没有配置 query，不支持查询线上数据"}
+
+        def on_progress(msg: str) -> bool:
+            return bool(self.api.progress(job["job_id"], msg).get("cancel"))
+
+        allowed = QUERY_ALLOWED_TOOLS + [f"Bash({p.query} *)"]
+        disallowed = DEFAULT_DISALLOWED_TOOLS + QUERY_DISALLOWED_TOOLS
+        timeout = min(p.timeout_minutes or self.cfg.timeout_minutes, 20) * 60
+        cr = self.claude.run(
+            build_query_prompt(job, p), p.path, allowed, disallowed, timeout, None, on_progress, permission_mode="default"
+        )
+        base = {"session_id": cr.session_id, "cost_usd": cr.cost_usd}
+        if cr.canceled:
+            return {**base, "ok": False, "canceled": True}
+        if not cr.ok:
+            return {**base, "ok": False, "error": cr.error}
+        return {**base, "ok": True, "summary": (cr.text or "").strip()}
 
     # ------------------------------------------------------------------ code
     def run_code(self, job: dict, p: Project) -> dict:

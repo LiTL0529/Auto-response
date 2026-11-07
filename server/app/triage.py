@@ -13,19 +13,19 @@ import httpx
 
 log = logging.getLogger(__name__)
 
-INTENTS = {"new_task", "followup", "status", "cancel", "chat"}
+INTENTS = {"new_task", "followup", "query", "status", "cancel", "chat"}
 
 SYSTEM_PROMPT = """你是一个软件外包团队的需求助理。需求方会在微信里用口语化的方式提需求，你负责理解并整理成开发能直接执行的任务。
 
 你会收到：
-- projects：可用项目列表（id、名称、别名、描述）
+- projects：可用项目列表（id、名称、别名、描述；can_query=true 表示可以直接查询这个项目的线上数据）
 - recent_tasks：该用户最近的任务（id、项目、标题、状态）
 - history：最近的聊天记录（in=用户发来，out=我们回复）
 - new_messages：用户刚刚连续发来的消息（可能被拆成多条，需要合起来理解；"[图片:xxx]" 表示一张截图）
 
 请只输出一个 JSON 对象，字段如下：
 {
-  "intent": "new_task | followup | status | cancel | chat",
+  "intent": "new_task | followup | query | status | cancel | chat",
   "project_id": "匹配到的项目 id，无法确定则为 null",
   "related_task_id": 跟进/取消/查询的任务 id（整数）或 null,
   "title": "不超过 20 字的任务标题",
@@ -37,7 +37,8 @@ SYSTEM_PROMPT = """你是一个软件外包团队的需求助理。需求方会�
 }
 
 判断规则：
-- new_task：提出了一个新的、可执行的修改/新功能/修 bug 需求。
+- new_task：提出了一个新的、可执行的修改/新功能/修 bug 需求，也就是要改软件。
+- query：只想知道线上系统里的数据或情况，不需要改软件。例如「查一下 wengao1 的登录记录」「这周有多少人登录」「某某账号最近做了什么操作」「导出/列出某些数据给我看看」。此时 requirement 写清楚要查什么（对象、时间范围、需要哪些信息），title 以「查询」开头。只有用户明确要求「做一个功能/页面/按钮」让以后在系统里自己查，才算 new_task；拿不准时按 query 处理。
 - followup：对最近某个任务的补充或修改（如"刚才那个按钮再大一点"），填 related_task_id。
 - status：询问进度。cancel：要求取消某个任务。
 - chat：闲聊、致谢，或者需求信息不足以开工——此时在 reply 里用一两句话友好地追问缺失的关键信息（例如是哪个项目、哪个页面）。
@@ -88,7 +89,10 @@ class TriageResult:
 
 def _project_brief(projects: list[dict]) -> list[dict]:
     return [
-        {"id": p["id"], "name": p.get("name", ""), "aliases": p.get("aliases", []), "description": p.get("description", "")}
+        {
+            "id": p["id"], "name": p.get("name", ""), "aliases": p.get("aliases", []),
+            "description": p.get("description", ""), "can_query": bool(p.get("has_query")),
+        }
         for p in projects
     ]
 

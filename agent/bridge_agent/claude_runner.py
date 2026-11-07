@@ -68,11 +68,13 @@ class ClaudeRunner:
         self.use_api_key = use_api_key
         self.max_turns = max_turns
 
-    def build_args(self, allowed: list[str], disallowed: list[str], resume: str | None) -> list[str]:
+    def build_args(
+        self, allowed: list[str], disallowed: list[str], resume: str | None, permission_mode: str = "acceptEdits"
+    ) -> list[str]:
         args = [
             resolve_claude(self.claude_path), "-p",
             "--output-format", "stream-json", "--verbose",
-            "--permission-mode", "acceptEdits",
+            "--permission-mode", permission_mode,
             "--max-turns", str(self.max_turns),
         ]
         if self.model:
@@ -104,9 +106,10 @@ class ClaudeRunner:
         timeout: float,
         resume: str | None = None,
         on_progress: Callable[[str], bool] | None = None,
+        permission_mode: str = "acceptEdits",
     ) -> ClaudeResult:
-        """on_progress(描述) 返回 True 表示需要取消。"""
-        args = self.build_args(allowed, disallowed, resume)
+        """on_progress(描述) 返回 True 表示需要取消。permission_mode="default" 时只允许 allowed 里的工具（只读查询用）。"""
+        args = self.build_args(allowed, disallowed, resume, permission_mode)
         log.info("启动 Claude：cwd=%s resume=%s", cwd, resume)
         proc = subprocess.Popen(
             args, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -15,6 +15,10 @@ DEFAULT_ALLOWED_TOOLS = [
     "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)", "Bash(git branch*)",
     "Bash(ls *)", "Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(find *)", "Bash(grep *)", "Bash(mkdir *)",
 ]
+# 只读查询：只能读代码，再加上项目自己的 query 命令；不能改任何文件
+QUERY_ALLOWED_TOOLS = ["Read", "Glob", "Grep", "LS", "TodoWrite"]
+QUERY_DISALLOWED_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"]
+
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 # 明确禁止：版本管理和部署由 Agent 负责，不让 Claude 自己动
@@ -40,6 +44,8 @@ class Project:
     package_artifact: str = ""  # 安装包路径（glob），如 dist/*.exe
     package_on_change: bool = False  # 每次改完都打包（否则仅在需求方要求时打包）
     url: str = ""  # 线上地址，部署成功后告诉需求方
+    query: str = ""  # 只读查询线上数据的命令前缀，如 bash D:/agent-projects/dx-query.sh（Claude 只能用它执行 SQL）
+    query_notes: str = ""  # 查询时给 Claude 的额外说明（数据库类型、常用表等）
     notes: str = ""  # 额外的项目约定，会附加到提示词
     on_dirty: str = "stash"  # 项目目录有未提交改动时：stash（自动暂存）/ fail（拒绝执行）
     auto_merge: bool = True  # 测试通过后自动合并到 base_branch
@@ -55,6 +61,7 @@ class Project:
             "description": self.description,
             "has_deploy": bool(self.deploy),
             "has_package": bool(self.package),
+            "has_query": bool(self.query),
             "url": self.url,
         }
 
