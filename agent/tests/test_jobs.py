@@ -17,10 +17,12 @@ FAKE_CLAUDE = textwrap.dedent(
     f"""\
     #!{sys.executable}
     import json, os, sys, time
+    sys.stdin.reconfigure(encoding="utf-8")
+    sys.stdout.reconfigure(encoding="utf-8")
     prompt = sys.stdin.read()
     mode = os.environ.get("FAKE_CLAUDE_MODE", "edit")
     args = sys.argv[1:]
-    open(os.path.join(os.environ["FAKE_LOG_DIR"], "args.json"), "w").write(json.dumps({{"args": args, "prompt": prompt}}))
+    open(os.path.join(os.environ["FAKE_LOG_DIR"], "args.json"), "w", encoding="utf-8").write(json.dumps({{"args": args, "prompt": prompt}}))
     def emit(d): print(json.dumps(d, ensure_ascii=False), flush=True)
     emit({{"type": "system", "subtype": "init", "session_id": "sess-1"}})
     if mode == "slow":
@@ -115,7 +117,7 @@ def test_edit_commit_test_merge(repo):
     # 附件下载了但没被提交
     assert (r / ".claude-attachments/task-7/1-shot.png").exists()
     assert ".claude-attachments" not in git(r, "show", "--stat", "HEAD^2")
-    call = json.loads((tmp / "args.json").read_text())
+    call = json.loads((tmp / "args.json").read_text(encoding="utf-8"))
     assert ".claude-attachments/task-7/1-shot.png" in call["prompt"]
     assert "--allowedTools" in call["args"] and "acceptEdits" in call["args"]
 
@@ -193,7 +195,7 @@ def test_deploy(repo):
 def test_resume_used_for_followup(repo):
     _, _, tmp = repo
     make_runner(repo, FakeAPI()).run(job(related_task={"id": 6, "title": "t", "requirement": "r", "summary": "s", "session_id": "old-sess"}))
-    call = json.loads((tmp / "args.json").read_text())
+    call = json.loads((tmp / "args.json").read_text(encoding="utf-8"))
     assert call["args"][call["args"].index("--resume") + 1] == "old-sess"
     assert "关联的上一个任务 #6" in call["prompt"]
 

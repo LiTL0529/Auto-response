@@ -57,6 +57,9 @@ def run(cmd: str | list[str], cwd: str, timeout: float, shell: bool | None = Non
     """执行命令并合并 stdout/stderr。字符串命令走 shell（用户在配置里写的 test/deploy/package）。"""
     if shell is None:
         shell = isinstance(cmd, str)
+    if env is None:
+        # 后台运行时没有控制台，Python 子进程默认编码可能不是 UTF-8，打印中文会崩
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen(
         cmd, cwd=cwd, shell=shell, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         env=env, **popen_kwargs(),
