@@ -1,11 +1,42 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
+
+MAIN_CHANNEL = "app"  # 主应用（WECOM_AGENT_ID 那个）的渠道名，用户 uid 形如 "app:<userid>"
+RESERVED_CHANNELS = {MAIN_CHANNEL, "kf"}
 
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def _list(value: str) -> list[str]:
+    return [x.strip() for x in value.split(",") if x.strip()]
+
+
+@dataclass
+class ExtraApp:
+    """额外的企业微信自建应用。每个应用有自己的回调地址 /wecom/callback/<key>，只处理自己的项目。"""
+
+    key: str  # 渠道名（小写字母/数字），用户 uid 形如 "<key>:<userid>"
+    name: str
+    agent_id: str
+    secret: str
+    callback_token: str
+    encoding_aes_key: str
+    projects: list[str] = field(default_factory=list)  # 该应用能处理的项目 id；空 = 全部
+
+    def missing(self) -> list[str]:
+        p = f"WECOM_{self.key.upper()}_"
+        required = {
+            p + "AGENT_ID": self.agent_id,
+            p + "APP_SECRET": self.secret,
+            p + "CALLBACK_TOKEN": self.callback_token,
+            p + "ENCODING_AES_KEY": self.encoding_aes_key,
+        }
+        return [k for k, v in required.items() if not v]
 
 
 @dataclass
@@ -33,8 +64,27 @@ class Settings:
     file_link_ttl_hours: int
     agent_offline_alert_minutes: int
 
+    # 主应用只处理这些项目（空 = 全部）
+    app_projects: list[str] = field(default_factory=list)
+    # 额外的自建应用（WECOM_APPS=dx,lab，每个再配 WECOM_<KEY>_* 一组变量）
+    extra_apps: list[ExtraApp] = field(default_factory=list)
+
     @classmethod
     def from_env(cls) -> "Settings":
+        extra = []
+        for key in _list(_env("WECOM_APPS").lower()):
+            p = f"WECOM_{key.upper()}_"
+            extra.append(
+                ExtraApp(
+                    key=key,
+                    name=_env(p + "NAME", key),
+                    agent_id=_env(p + "AGENT_ID"),
+                    secret=_env(p + "APP_SECRET"),
+                    callback_token=_env(p + "CALLBACK_TOKEN"),
+                    encoding_aes_key=_env(p + "ENCODING_AES_KEY"),
+                    projects=_list(_env(p + "PROJECTS")),
+                )
+            )
         return cls(
             corp_id=_env("WECOM_CORP_ID"),
             app_agent_id=_env("WECOM_AGENT_ID"),
@@ -51,6 +101,8 @@ class Settings:
             merge_window_seconds=float(_env("MERGE_WINDOW_SECONDS", "15")),
             file_link_ttl_hours=int(_env("FILE_LINK_TTL_HOURS", "168")),
             agent_offline_alert_minutes=int(_env("AGENT_OFFLINE_ALERT_MINUTES", "10")),
+            app_projects=_list(_env("WECOM_PROJECTS")),
+            extra_apps=extra,
         )
 
     def missing(self) -> list[str]:
@@ -64,4 +116,9 @@ class Settings:
             "AGENT_TOKEN": self.agent_token,
             "PUBLIC_BASE_URL": self.public_base_url,
         }
-        return [k for k, v in required.items() if not v]
+        out = [k for k, v in required.items() if not v]
+        for a in self.extra_apps:
+            if not re.fullmatch(r"[a-z][a-z0-9]{0,15}", a.key) or a.key in RESERVED_CHANNELS:
+                out.append(f"WECOM_APPS 里的「{a.key}」（只能用小写字母和数字，且不能是 app / kf）")
+            out += a.missing()
+        return out

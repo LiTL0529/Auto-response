@@ -28,6 +28,17 @@
 
 再记下你自己的账号：**通讯录 → 点自己 → 账号**（`OWNER_USERID`）。
 
+### 1.2.1 多个应用（可选）
+
+想按项目分开（比如「需求助手」管桌面软件、「智能党校」只管党校平台），可以再建几个自建应用：
+
+1. 照 1.2 再创建一个自建应用，记下 AgentId，Secret 在企业微信 App 里查看
+2. 给它起一个渠道名（小写字母/数字，如 `dx`），接收消息的 URL 填 `https://你的域名/wecom/callback/dx`，Token / EncodingAESKey 随机获取
+3. 在服务器 `deploy/.env` 里加上 `WECOM_APPS=dx` 和一组 `WECOM_DX_*`（见 `.env.example`），`WECOM_DX_PROJECTS` 填这个应用负责的项目 id
+4. `systemctl restart auto-response` 后回到企业微信保存回调；企业可信 IP 每个应用都要单独配置
+
+每个应用只处理自己的项目，回复、审批（「同意 N」）和部署结果都在同一个应用里。主应用默认处理全部项目，可以用 `WECOM_PROJECTS` 限制。朋友在每个应用里需要分别授权。
+
 ### 1.3 让朋友接入（二选一）
 
 **方案 A：朋友加入你的企业（最简单，推荐）**

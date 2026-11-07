@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 
 from . import db as S
+from .config import MAIN_CHANNEL
 from .db import Database
 from .files import FileStore
 from .textfmt import plain_text
@@ -40,7 +41,7 @@ COMMANDS = [
     ("cancel", re.compile(r"^取消\s*#?(\d+)$")),
     ("status", re.compile(r"^(?:进度|状态|任务)\s*#?(\d+)?$")),
     ("deploy", re.compile(r"^部署\s+(\S+)$")),
-    ("grant", re.compile(r"^授权\s+((?:app|kf):\S+)(?:\s+(\S+))?$")),
+    ("grant", re.compile(r"^授权\s+([a-z][a-z0-9]*:\S+)(?:\s+(\S+))?$")),
     ("users", re.compile(r"^用户$")),
     ("help", re.compile(r"^(?:帮助|help|\?|？)$", re.I)),
 ]
@@ -68,19 +69,25 @@ class Incoming:
 
 
 class Messenger:
-    """按用户来源（自建应用 / 微信客服）选择发送通道。"""
+    """按用户来源（哪个自建应用 / 微信客服）选择发送通道。uid 形如 "<渠道>:<id>"。"""
 
-    def __init__(self, wecom: WeComClient, db: Database, owner_uid: str):
-        self.wecom = wecom
+    def __init__(self, wecom: WeComClient, db: Database, owner_userid: str, apps: dict[str, WeComClient] | None = None):
+        self.wecom = wecom  # 主应用，也负责微信客服
+        self.apps: dict[str, WeComClient] = {MAIN_CHANNEL: wecom, **(apps or {})}
         self.db = db
-        self.owner_uid = owner_uid
+        self.owner_userid = owner_userid
+        self.owner_uid = f"{MAIN_CHANNEL}:{owner_userid}"
+
+    def owner_on(self, channel: str) -> str:
+        """负责人在某个应用里的 uid；微信客服等非应用渠道回到主应用。"""
+        return f"{channel}:{self.owner_userid}" if channel in self.apps else self.owner_uid
 
     async def send(self, uid: str, text: str) -> bool:
         text = plain_text(text)  # 企业微信文本消息不渲染 Markdown
         channel, _, ident = uid.partition(":")
         try:
-            if channel == "app":
-                await self.wecom.send_app_text(ident, text)
+            if channel in self.apps:
+                await self.apps[channel].send_app_text(ident, text)
             elif channel == "kf":
                 user = self.db.get_user(uid)
                 open_kfid = ((user or {}).get("meta") or {}).get("open_kfid")
@@ -97,8 +104,8 @@ class Messenger:
         self.db.add_message(uid, "out", text)
         return True
 
-    async def owner(self, text: str) -> bool:
-        return await self.send(self.owner_uid, text)
+    async def owner(self, text: str, channel: str = MAIN_CHANNEL) -> bool:
+        return await self.send(self.owner_on(channel), text)
 
     def _name(self, uid: str) -> str:
         u = self.db.get_user(uid)
@@ -114,6 +121,7 @@ class Dispatcher:
         files: FileStore,
         merge_window: float = 15,
         offline_alert_minutes: int = 10,
+        channel_projects: dict[str, list[str]] | None = None,
     ):
         self.db = db
         self.msg = messenger
@@ -124,6 +132,8 @@ class Dispatcher:
         self.buffers: dict[str, list[Incoming]] = {}
         self.timers: dict[str, asyncio.Task] = {}
         self.job_event = asyncio.Event()
+        # 每个应用能处理的项目 id；没列出或为空 = 全部项目
+        self.channel_projects = {k: v for k, v in (channel_projects or {}).items() if v}
 
     # ------------------------------------------------------------------ 工具
     @property
@@ -132,6 +142,16 @@ class Dispatcher:
 
     def projects(self) -> list[dict]:
         return json.loads(self.db.kv_get("projects", "[]"))
+
+    def projects_for(self, uid: str) -> list[dict]:
+        """这个用户所在的应用能处理的项目。"""
+        allowed = self.channel_projects.get(uid.partition(":")[0])
+        projects = self.projects()
+        return [p for p in projects if p["id"] in allowed] if allowed else projects
+
+    def owner_for(self, uid: str) -> str:
+        """和 uid 同一个应用里的负责人（通知发到对应的应用里）。"""
+        return self.msg.owner_on(uid.partition(":")[0])
 
     def project(self, project_id: str) -> dict | None:
         return next((p for p in self.projects() if p["id"] == project_id), None)
@@ -149,7 +169,8 @@ class Dispatcher:
         return time.time() - last < 120
 
     def is_owner(self, uid: str) -> bool:
-        return uid == self.owner_uid
+        channel, _, ident = uid.partition(":")
+        return channel in self.msg.apps and ident == self.msg.owner_userid
 
     def format_task(self, t: dict, detail: bool = False) -> str:
         line = f"#{t['id']}【{t['title']}】{S.STATUS_LABELS.get(t['status'], t['status'])}"
@@ -205,7 +226,7 @@ class Dispatcher:
             log.exception("处理 %s 的消息失败", uid)
             await self.msg.send(uid, "抱歉，处理你的消息时出错了，已通知负责人。")
             if not self.is_owner(uid):
-                await self.msg.owner(f"⚠️ 处理 {self.user_name(uid)} 的消息时出错，请查看服务器日志。")
+                await self.msg.send(self.owner_for(uid), f"⚠️ 处理 {self.user_name(uid)} 的消息时出错，请查看服务器日志。")
 
     async def _unknown_user(self, item: Incoming) -> None:
         key = f"unknown_notified:{item.uid}"
@@ -213,7 +234,8 @@ class Dispatcher:
         if time.time() - last < 3600:
             return
         self.db.kv_set(key, str(time.time()))
-        await self.msg.owner(
+        await self.msg.send(
+            self.owner_for(item.uid),
             f"有未授权用户发来消息：\n{item.as_text()[:200]}\n\n如果是自己人，回复：\n授权 {item.uid} 名字"
         )
 
@@ -221,10 +243,10 @@ class Dispatcher:
         items = self.buffers.pop(uid, [])
         if not items:
             return
-        projects = self.projects()
+        projects = self.projects_for(uid)
         if not projects:
-            await self.msg.send(uid, "家里的电脑还没连上服务器（没有上报项目列表），需求先记下了，稍后会处理。")
-            await self.msg.owner("⚠️ 有人提需求，但家里电脑的 Agent 从未连接过服务器，请检查。")
+            await self.msg.send(uid, "家里的电脑还没连上服务器（没有上报这个应用对应的项目），需求先记下了，稍后会处理。")
+            await self.msg.send(self.owner_for(uid), "⚠️ 有人提需求，但家里电脑的 Agent 还没上报这个应用对应的项目，请检查 Agent 是否在线、config.yaml 里的项目 id。")
             self.buffers[uid] = items + self.buffers.get(uid, [])
             return
 
@@ -271,6 +293,8 @@ class Dispatcher:
             return
 
         project_id = r.project_id or (related or {}).get("project_id")
+        if project_id and project_id not in {p["id"] for p in self.projects_for(uid)}:
+            project_id = None
         if not project_id:
             await self.msg.send(uid, "请问是哪个项目的需求？")
             return
@@ -292,7 +316,8 @@ class Dispatcher:
 
         if task["status"] == S.AWAITING_CONFIRM:
             await self.msg.send(uid, f"收到，任务 #{task['id']}【{task['title']}】改动较大，需要负责人确认后开始，确认后会通知你。")
-            await self.msg.owner(
+            await self.msg.send(
+                self.owner_for(uid),
                 f"🟡 {self.user_name(uid)} 提了一个较大的需求，需要你确认：\n"
                 f"#{task['id']}【{task['title']}】项目：{pname}\n{task['requirement'][:800]}\n验收：\n{criteria}\n\n"
                 f"回复「同意 {task['id']}」开始，「拒绝 {task['id']}」不做。"
@@ -308,7 +333,7 @@ class Dispatcher:
             f"收到！任务 #{task['id']}【{task['title']}】（{pname}）已加入队列，{tip}。\n我的理解：{task['requirement'][:300]}{offline}",
         )
         if not self.is_owner(uid):
-            await self.msg.owner(f"🔵 {self.user_name(uid)} 新需求 #{task['id']}【{task['title']}】（{pname}），已自动开始。")
+            await self.msg.send(self.owner_for(uid), f"🔵 {self.user_name(uid)} 新需求 #{task['id']}【{task['title']}】（{pname}），已自动开始。")
 
     # ------------------------------------------------------------------ 指令
     async def run_command(self, uid: str, name: str, args: tuple) -> None:
@@ -322,20 +347,20 @@ class Dispatcher:
         elif not owner:
             await self.msg.send(uid, "这个指令只有负责人可以用。")
         elif name == "approve":
-            await self.approve(int(args[0]))
+            await self.approve(int(args[0]), uid)
         elif name == "reject":
-            await self.reject(int(args[0]))
+            await self.reject(int(args[0]), uid)
         elif name == "deploy":
-            await self.start_deploy(args[0], [])
+            await self.start_deploy(args[0], [], uid)
         elif name == "grant":
             target, uname = args[0], args[1] or ""
             pending_kfid = self.db.kv_get(f"pending_kfid:{target}")
             self.db.upsert_user(target, "friend", uname, {"open_kfid": pending_kfid} if pending_kfid else None)
-            await self.msg.owner(f"已授权 {uname or target}，ta 现在可以提需求了。")
+            await self.msg.send(uid, f"已授权 {uname or target}，ta 现在可以提需求了。")
             await self.msg.send(target, "你好，已开通需求通道～直接描述需求就行，发「帮助」查看用法。")
         elif name == "users":
             lines = [f"{u['name'] or '-'}  {u['uid']}  ({u['role']})" for u in self.db.list_users()]
-            await self.msg.owner("\n".join(lines) or "暂无")
+            await self.msg.send(uid, "\n".join(lines) or "暂无")
 
     async def reply_status(self, uid: str, task_id: int | None) -> None:
         if task_id:
@@ -345,7 +370,11 @@ class Dispatcher:
                 return
             await self.msg.send(uid, self.format_task(t, detail=True))
             return
-        tasks = self.db.list_tasks(uid=None if self.is_owner(uid) else uid, limit=8)
+        if self.is_owner(uid):
+            mine = {p["id"] for p in self.projects_for(uid)} if uid.partition(":")[0] in self.channel_projects else None
+            tasks = [t for t in self.db.list_tasks(limit=50) if mine is None or t["project_id"] in mine][:8]
+        else:
+            tasks = self.db.list_tasks(uid=uid, limit=8)
         if not tasks:
             await self.msg.send(uid, "还没有任务。")
             return
@@ -369,54 +398,54 @@ class Dispatcher:
         else:
             await self.msg.send(uid, f"任务 #{task_id} 当前状态是「{S.STATUS_LABELS.get(t['status'])}」，无法取消。")
 
-    async def approve(self, task_id: int) -> None:
+    async def approve(self, task_id: int, reply_to: str) -> None:
         t = self.db.get_task(task_id)
         if not t:
-            await self.msg.owner(f"没有找到任务 #{task_id}。")
+            await self.msg.send(reply_to, f"没有找到任务 #{task_id}。")
             return
         if t["status"] == S.AWAITING_CONFIRM:
             self.enqueue_code_job(t)
-            await self.msg.owner(f"好的，#{task_id} 已开始排队处理。")
-            if t["uid"] != self.owner_uid:
+            await self.msg.send(reply_to, f"好的，#{task_id} 已开始排队处理。")
+            if not self.is_owner(t["uid"]):
                 await self.msg.send(t["uid"], f"任务 #{task_id}【{t['title']}】负责人已确认，开始处理。")
         elif t["status"] == S.AWAITING_DEPLOY:
             pending = self.db.tasks_by_project_status(t["project_id"], S.AWAITING_DEPLOY)
-            await self.start_deploy(t["project_id"], [p["id"] for p in pending])
+            await self.start_deploy(t["project_id"], [p["id"] for p in pending], reply_to)
         else:
-            await self.msg.owner(f"#{task_id} 当前状态是「{S.STATUS_LABELS.get(t['status'])}」，不需要确认。")
+            await self.msg.send(reply_to, f"#{task_id} 当前状态是「{S.STATUS_LABELS.get(t['status'])}」，不需要确认。")
 
-    async def reject(self, task_id: int) -> None:
+    async def reject(self, task_id: int, reply_to: str) -> None:
         t = self.db.get_task(task_id)
         if not t:
-            await self.msg.owner(f"没有找到任务 #{task_id}。")
+            await self.msg.send(reply_to, f"没有找到任务 #{task_id}。")
             return
         if t["status"] == S.AWAITING_CONFIRM:
             self.db.update_task(task_id, status=S.REJECTED)
-            await self.msg.owner(f"已拒绝 #{task_id}。")
-            if t["uid"] != self.owner_uid:
+            await self.msg.send(reply_to, f"已拒绝 #{task_id}。")
+            if not self.is_owner(t["uid"]):
                 await self.msg.send(t["uid"], f"任务 #{task_id}【{t['title']}】负责人暂时不做，有疑问可以直接沟通。")
         elif t["status"] == S.AWAITING_DEPLOY:
             self.db.update_task(task_id, status=S.DONE)
-            await self.msg.owner(f"#{task_id} 暂不部署（代码已合并在本地主分支，下次部署时会一起带上）。")
-            if t["uid"] != self.owner_uid:
+            await self.msg.send(reply_to, f"#{task_id} 暂不部署（代码已合并在本地主分支，下次部署时会一起带上）。")
+            if not self.is_owner(t["uid"]):
                 await self.msg.send(t["uid"], f"任务 #{task_id}【{t['title']}】已完成开发，上线时间负责人另行安排。")
         else:
-            await self.msg.owner(f"#{task_id} 当前状态是「{S.STATUS_LABELS.get(t['status'])}」，无法拒绝。")
+            await self.msg.send(reply_to, f"#{task_id} 当前状态是「{S.STATUS_LABELS.get(t['status'])}」，无法拒绝。")
 
-    async def start_deploy(self, project_id: str, task_ids: list[int]) -> None:
+    async def start_deploy(self, project_id: str, task_ids: list[int], reply_to: str) -> None:
         p = self.project(project_id)
         if not p:
-            await self.msg.owner(f"没有项目「{project_id}」。可用：{', '.join(x['id'] for x in self.projects())}")
+            await self.msg.send(reply_to, f"没有项目「{project_id}」。可用：{', '.join(x['id'] for x in self.projects())}")
             return
         if not p.get("has_deploy"):
-            await self.msg.owner(f"项目「{p.get('name') or project_id}」没有配置部署命令。")
+            await self.msg.send(reply_to, f"项目「{p.get('name') or project_id}」没有配置部署命令。")
             return
         for tid in task_ids:
             self.db.update_task(tid, status=S.DEPLOYING)
-        self.db.create_job("deploy", project_id, payload={"task_ids": task_ids})
+        self.db.create_job("deploy", project_id, payload={"task_ids": task_ids, "notify": reply_to})
         self.job_event.set()
         ids = "、".join(f"#{i}" for i in task_ids) or "无关联任务"
-        await self.msg.owner(f"🚀 开始部署 {p.get('name') or project_id}（包含 {ids}）")
+        await self.msg.send(reply_to, f"🚀 开始部署 {p.get('name') or project_id}（包含 {ids}）")
 
     # ------------------------------------------------------------------ Agent 接口
     async def agent_hello(self, projects: list[dict], startup: bool) -> None:
@@ -501,7 +530,8 @@ class Dispatcher:
     async def _code_result(self, job: dict, result: dict) -> None:
         t = self.db.get_task(job["task_id"])
         uid, tid, title = t["uid"], t["id"], t["title"]
-        from_friend = uid != self.owner_uid
+        from_friend = not self.is_owner(uid)
+        owner_uid = self.owner_for(uid)
         fields = {
             "branch": result.get("branch", ""),
             "session_id": result.get("session_id", ""),
@@ -519,7 +549,7 @@ class Dispatcher:
             self.db.update_task(tid, status=S.FAILED, error=(result.get("error") or "")[:4000], **fields)
             if from_friend:
                 await self.msg.send(uid, f"任务 #{tid}【{title}】这次没能自动完成，已通知负责人处理，请稍等。")
-            await self.msg.owner(f"🔴 任务 #{tid}【{title}】失败：\n{(result.get('error') or '')[:1200]}")
+            await self.msg.send(owner_uid, f"🔴 任务 #{tid}【{title}】失败：\n{(result.get('error') or '')[:1200]}")
             return
 
         p = self.project(t["project_id"]) or {}
@@ -551,24 +581,26 @@ class Dispatcher:
         if needs_deploy:
             owner_text += f"\n\n回复「同意 {tid}」部署上线，「拒绝 {tid}」暂不部署。"
         if from_friend or needs_deploy or result.get("notes") or result.get("package_error"):
-            await self.msg.owner(owner_text)
+            await self.msg.send(owner_uid, owner_text)
 
     async def _deploy_result(self, job: dict, result: dict) -> None:
         task_ids = (job["payload"] or {}).get("task_ids", [])
+        first = self.db.get_task(task_ids[0]) if task_ids else None
+        notify = (job["payload"] or {}).get("notify") or (self.owner_for(first["uid"]) if first else self.owner_uid)
         p = self.project(job["project_id"]) or {}
         pname = p.get("name") or job["project_id"]
         if result.get("ok"):
             url = p.get("url") or ""
             for tid in task_ids:
                 t = self.db.update_task(tid, status=S.DEPLOYED)
-                if t and t["uid"] != self.owner_uid:
+                if t and not self.is_owner(t["uid"]):
                     await self.msg.send(t["uid"], f"🎉 任务 #{tid}【{t['title']}】已上线！{('访问：' + url) if url else ''}")
-            await self.msg.owner(f"✅ {pname} 部署成功。{url}")
+            await self.msg.send(notify, f"✅ {pname} 部署成功。{url}")
         else:
             for tid in task_ids:
                 self.db.update_task(tid, status=S.AWAITING_DEPLOY)
             retry = f"修复后回复「同意 {task_ids[0]}」重试。" if task_ids else f"修复后回复「部署 {job['project_id']}」重试。"
-            await self.msg.owner(f"🔴 {pname} 部署失败：\n{(result.get('error') or '')[-1500:]}\n\n{retry}")
+            await self.msg.send(notify, f"🔴 {pname} 部署失败：\n{(result.get('error') or '')[-1500:]}\n\n{retry}")
 
     # ------------------------------------------------------------------ 后台巡检
     async def monitor_loop(self) -> None:

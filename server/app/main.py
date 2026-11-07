@@ -1,7 +1,8 @@
 """FastAPI 入口。
 
 对外接口：
-- GET/POST /wecom/callback      企业微信回调（自建应用消息 + 微信客服事件）
+- GET/POST /wecom/callback      企业微信回调（主应用消息 + 微信客服事件）
+- GET/POST /wecom/callback/<k>  额外自建应用 <k> 的回调（WECOM_APPS 里配置）
 - /api/agent/*                  家里电脑 Agent 调用（Bearer AGENT_TOKEN）
 - GET /files/{id}/{name}        签名下载链接（安装包、截图）
 """
@@ -20,7 +21,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPE
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel
 
-from .config import Settings
+from .config import MAIN_CHANNEL, Settings
 from .db import Database
 from .dispatcher import Dispatcher, Incoming, Messenger
 from .files import FileStore
@@ -46,41 +47,61 @@ class Progress(BaseModel):
 class App:
     """把各组件装配在一起，方便测试时替换。"""
 
-    def __init__(self, settings: Settings, http: httpx.AsyncClient, wecom: WeComClient | None = None):
+    def __init__(
+        self,
+        settings: Settings,
+        http: httpx.AsyncClient,
+        wecom: WeComClient | None = None,
+        extra_wecom: dict[str, WeComClient] | None = None,
+    ):
         os.makedirs(settings.data_dir, exist_ok=True)
         self.settings = settings
         self.http = http
         self.db = Database(os.path.join(settings.data_dir, "bridge.db"))
         self.crypto = WeComCrypto(settings.callback_token, settings.encoding_aes_key, settings.corp_id)
         self.wecom = wecom or WeComClient(settings.corp_id, settings.app_secret, settings.app_agent_id, http)
+        # 每个渠道（自建应用）各自的加解密和发送客户端
+        self.cryptos: dict[str, WeComCrypto] = {MAIN_CHANNEL: self.crypto}
+        self.clients: dict[str, WeComClient] = {MAIN_CHANNEL: self.wecom}
+        for a in settings.extra_apps:
+            self.cryptos[a.key] = WeComCrypto(a.callback_token, a.encoding_aes_key, settings.corp_id)
+            self.clients[a.key] = (extra_wecom or {}).get(a.key) or WeComClient(settings.corp_id, a.secret, a.agent_id, http)
         self.files = FileStore(
             os.path.join(settings.data_dir, "files"), self.db, settings.agent_token, settings.public_base_url, settings.file_link_ttl_hours
         )
-        owner_uid = f"app:{settings.owner_userid}"
-        self.db.upsert_user(owner_uid, "owner", (self.db.get_user(owner_uid) or {}).get("name") or "负责人")
-        self.messenger = Messenger(self.wecom, self.db, owner_uid)
+        for channel in self.clients:
+            owner_uid = f"{channel}:{settings.owner_userid}"
+            self.db.upsert_user(owner_uid, "owner", (self.db.get_user(owner_uid) or {}).get("name") or "负责人")
+        extra_clients = {k: c for k, c in self.clients.items() if k != MAIN_CHANNEL}
+        self.messenger = Messenger(self.wecom, self.db, settings.owner_userid, extra_clients)
         self.triage = Triage(settings.dashscope_api_key, settings.dashscope_base_url, settings.qwen_model, http)
         self.dispatcher = Dispatcher(
-            self.db, self.messenger, self.triage, self.files, settings.merge_window_seconds, settings.agent_offline_alert_minutes
+            self.db,
+            self.messenger,
+            self.triage,
+            self.files,
+            settings.merge_window_seconds,
+            settings.agent_offline_alert_minutes,
+            channel_projects={MAIN_CHANNEL: settings.app_projects, **{a.key: a.projects for a in settings.extra_apps}},
         )
 
     # ---- 回调处理 ----
-    async def handle_callback_xml(self, xml_text: str) -> None:
+    async def handle_callback_xml(self, xml_text: str, channel: str = MAIN_CHANNEL) -> None:
         msg = parse_xml(xml_text)
         mtype = msg.get("MsgType")
-        if mtype == "event" and msg.get("Event") == "kf_msg_or_event":
+        if mtype == "event" and msg.get("Event") == "kf_msg_or_event" and channel == MAIN_CHANNEL:
             await self.sync_kf(msg.get("OpenKfId", ""), msg.get("Token"))
             return
         if mtype == "event":
             return
         msgid = msg.get("MsgId") or f"{msg.get('FromUserName')}:{msg.get('CreateTime')}"
-        if not self.db.mark_seen(f"app:{msgid}"):
+        if not self.db.mark_seen(f"{channel}:{msgid}"):
             return
-        uid = f"app:{msg.get('FromUserName')}"
+        uid = f"{channel}:{msg.get('FromUserName')}"
         if mtype == "text":
             await self.dispatcher.handle_incoming(Incoming(uid=uid, text=msg.get("Content", "")))
         elif mtype == "image":
-            file_id, name = await self._save_media(msg.get("MediaId"), msg.get("PicUrl"))
+            file_id, name = await self._save_media(msg.get("MediaId"), msg.get("PicUrl"), channel)
             await self.dispatcher.handle_incoming(Incoming(uid=uid, file_id=file_id, filename=name))
         else:
             await self.messenger.send(uid, "暂时只支持文字和图片消息～")
@@ -118,16 +139,21 @@ class App:
             file_id, name = await self._save_media(m["image"]["media_id"], None)
             await self.dispatcher.handle_incoming(Incoming(uid=uid, file_id=file_id, filename=name))
 
-    async def _save_media(self, media_id: str | None, pic_url: str | None) -> tuple[str, str]:
+    async def _save_media(self, media_id: str | None, pic_url: str | None, channel: str = MAIN_CHANNEL) -> tuple[str, str]:
+        client = self.clients.get(channel, self.wecom)
         if media_id:
-            data, name, ctype = await self.wecom.download_media(media_id)
+            data, name, ctype = await client.download_media(media_id)
         else:
-            data, ctype = await self.wecom.download_url(pic_url)
+            data, ctype = await client.download_url(pic_url)
             name = "image.jpg"
         return self.files.save_bytes(data, name, ctype), name
 
 
-def create_app(settings: Settings | None = None, wecom: WeComClient | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    wecom: WeComClient | None = None,
+    extra_wecom: dict[str, WeComClient] | None = None,
+) -> FastAPI:
     settings = settings or Settings.from_env()
     missing = settings.missing()
     if missing:
@@ -138,11 +164,11 @@ def create_app(settings: Settings | None = None, wecom: WeComClient | None = Non
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         http = httpx.AsyncClient(timeout=30)
-        core = App(settings, http, wecom)
+        core = App(settings, http, wecom, extra_wecom)
         state["core"] = core
         app.state.core = core
         monitor = asyncio.create_task(core.dispatcher.monitor_loop())
-        log.info("服务启动，项目数：%d", len(core.dispatcher.projects()))
+        log.info("服务启动，项目数：%d，应用：%s", len(core.dispatcher.projects()), "、".join(core.clients))
         yield
         monitor.cancel()
         await http.aclose()
@@ -158,31 +184,58 @@ def create_app(settings: Settings | None = None, wecom: WeComClient | None = Non
             raise HTTPException(401, "invalid agent token")
 
     # ------------------------------------------------ 企业微信回调
-    @app.get("/wecom/callback", response_class=PlainTextResponse)
-    async def wecom_verify(msg_signature: str, timestamp: str, nonce: str, echostr: str):
+    def crypto_for(channel: str) -> WeComCrypto:
+        c = core().cryptos.get(channel)
+        if c is None:
+            raise HTTPException(404, "unknown app")
+        return c
+
+    async def verify(channel: str, msg_signature: str, timestamp: str, nonce: str, echostr: str) -> str:
         try:
-            return core().crypto.verify_url(msg_signature, timestamp, nonce, echostr)
+            return crypto_for(channel).verify_url(msg_signature, timestamp, nonce, echostr)
         except WeComCryptoError as e:
             raise HTTPException(403, str(e)) from e
 
-    @app.post("/wecom/callback", response_class=PlainTextResponse)
-    async def wecom_callback(request: Request, background: BackgroundTasks, msg_signature: str, timestamp: str, nonce: str):
+    async def receive(channel: str, request: Request, background: BackgroundTasks, msg_signature: str, timestamp: str, nonce: str):
+        crypto = crypto_for(channel)
         body = await request.body()
         try:
-            xml_text = core().crypto.decrypt_callback(msg_signature, timestamp, nonce, body)
+            xml_text = crypto.decrypt_callback(msg_signature, timestamp, nonce, body)
         except WeComCryptoError as e:
-            log.warning("回调校验失败：%s", e)
+            log.warning("回调校验失败（%s）：%s", channel, e)
             raise HTTPException(403, str(e)) from e
 
         async def process():
             try:
-                await core().handle_callback_xml(xml_text)
+                await core().handle_callback_xml(xml_text, channel)
             except Exception:  # noqa: BLE001
-                log.exception("处理回调失败")
+                log.exception("处理回调失败（%s）", channel)
 
         # 企业微信要求 5 秒内响应，实际处理放到后台
         background.add_task(process)
         return "success"
+
+    @app.get("/wecom/callback", response_class=PlainTextResponse)
+    async def wecom_verify(msg_signature: str, timestamp: str, nonce: str, echostr: str):
+        return await verify(MAIN_CHANNEL, msg_signature, timestamp, nonce, echostr)
+
+    @app.post("/wecom/callback", response_class=PlainTextResponse)
+    async def wecom_callback(request: Request, background: BackgroundTasks, msg_signature: str, timestamp: str, nonce: str):
+        return await receive(MAIN_CHANNEL, request, background, msg_signature, timestamp, nonce)
+
+    @app.get("/wecom/callback/{channel}", response_class=PlainTextResponse)
+    async def wecom_verify_app(channel: str, msg_signature: str, timestamp: str, nonce: str, echostr: str):
+        if channel == MAIN_CHANNEL:
+            raise HTTPException(404, "unknown app")
+        return await verify(channel, msg_signature, timestamp, nonce, echostr)
+
+    @app.post("/wecom/callback/{channel}", response_class=PlainTextResponse)
+    async def wecom_callback_app(
+        channel: str, request: Request, background: BackgroundTasks, msg_signature: str, timestamp: str, nonce: str
+    ):
+        if channel == MAIN_CHANNEL:
+            raise HTTPException(404, "unknown app")
+        return await receive(channel, request, background, msg_signature, timestamp, nonce)
 
     # ------------------------------------------------ Agent 接口
     @app.post("/api/agent/hello", dependencies=[Depends(require_agent)])
