@@ -4,7 +4,8 @@ server_url: https://bot.example.com        # 云端服务器地址
 agent_token: 换成和服务器 AGENT_TOKEN 一样的值
 
 claude_path: claude          # 找不到时填完整路径，如 C:\Users\你\.local\bin\claude.exe
-claude_model: ""             # 留空使用 Claude Code 默认模型
+claude_model: ""             # 留空使用 Claude Code 默认模型，如 claude-opus-5-5
+claude_effort: ""            # low / medium / high / xhigh / max，留空使用默认（需要较新的 Claude Code）
 use_api_key: false           # false = 使用订阅账号登录（推荐）
 timeout_minutes: 60          # 单个需求 Claude 最长工作时间
 max_turns: 100

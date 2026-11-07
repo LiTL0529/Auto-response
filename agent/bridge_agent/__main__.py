@@ -78,7 +78,7 @@ def check(cfg: Config, api: ServerAPI) -> int:
 
 
 def serve(cfg: Config, api: ServerAPI) -> None:
-    claude = ClaudeRunner(cfg.claude_path, cfg.claude_model, cfg.use_api_key, cfg.max_turns)
+    claude = ClaudeRunner(cfg.claude_path, cfg.claude_model, cfg.use_api_key, cfg.max_turns, cfg.claude_effort)
     runner = JobRunner(cfg, api, claude)
     projects = [p.public_info() for p in cfg.projects]
 

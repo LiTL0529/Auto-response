@@ -15,6 +15,8 @@ DEFAULT_ALLOWED_TOOLS = [
     "Bash(git status*)", "Bash(git diff*)", "Bash(git log*)", "Bash(git show*)", "Bash(git branch*)",
     "Bash(ls *)", "Bash(cat *)", "Bash(head *)", "Bash(tail *)", "Bash(find *)", "Bash(grep *)", "Bash(mkdir *)",
 ]
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
 # 明确禁止：版本管理和部署由 Agent 负责，不让 Claude 自己动
 DEFAULT_DISALLOWED_TOOLS = [
     "Bash(git commit*)", "Bash(git push*)", "Bash(git checkout*)", "Bash(git switch*)", "Bash(git reset*)",
@@ -64,6 +66,7 @@ class Config:
     projects: list[Project]
     claude_path: str = "claude"
     claude_model: str = ""  # 留空使用 Claude Code 默认模型
+    claude_effort: str = ""  # low / medium / high / xhigh / max，留空使用 Claude Code 默认
     timeout_minutes: int = 60
     max_turns: int = 100
     use_api_key: bool = False  # False：强制使用订阅账号登录（会去掉 ANTHROPIC_API_KEY 环境变量）
@@ -94,5 +97,8 @@ def load_config(path: str | os.PathLike) -> Config:
     if unknown:
         raise ValueError(f"未知配置项：{', '.join(sorted(unknown))}")
     cfg = Config(projects=projects, **data)
+    cfg.claude_effort = (cfg.claude_effort or "").strip().lower()
+    if cfg.claude_effort and cfg.claude_effort not in EFFORT_LEVELS:
+        raise ValueError(f"claude_effort 只能是 {' / '.join(EFFORT_LEVELS)}，或留空")
     cfg.server_url = cfg.server_url.rstrip("/")
     return cfg

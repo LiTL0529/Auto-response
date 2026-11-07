@@ -127,6 +127,23 @@ def test_api_key_stripped_for_subscription():
     assert "ANTHROPIC_API_KEY" not in env
 
 
+def test_model_and_effort_args(monkeypatch):
+    monkeypatch.setattr(claude_runner, "resolve_claude", lambda p: p)
+    args = ClaudeRunner("claude", model="claude-opus-5-5", effort="high").build_args([], [], None)
+    assert args[args.index("--model") + 1] == "claude-opus-5-5"
+    assert args[args.index("--effort") + 1] == "high"
+    assert "--effort" not in ClaudeRunner("claude").build_args([], [], None)
+
+
+def test_invalid_effort_rejected(tmp_path):
+    from bridge_agent.config import load_config
+    (tmp_path / "p").mkdir()
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(f"server_url: http://x\nagent_token: t\nclaude_effort: huge\nprojects:\n  - id: p\n    path: {tmp_path / 'p'}\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="claude_effort"):
+        load_config(cfg)
+
+
 def test_failing_tests_keep_branch_unmerged(repo):
     r, _, _ = repo
     res = make_runner(repo, FakeAPI(), test=f'"{sys.executable}" -c "import sys; print(\'FAILED x\'); sys.exit(1)"').run(job())

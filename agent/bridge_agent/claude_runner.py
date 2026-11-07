@@ -58,9 +58,13 @@ def resolve_claude(path: str) -> str:
 
 
 class ClaudeRunner:
-    def __init__(self, claude_path: str = "claude", model: str = "", use_api_key: bool = False, max_turns: int = 100):
+    def __init__(
+        self, claude_path: str = "claude", model: str = "", use_api_key: bool = False, max_turns: int = 100,
+        effort: str = "",
+    ):
         self.claude_path = claude_path
         self.model = model
+        self.effort = effort
         self.use_api_key = use_api_key
         self.max_turns = max_turns
 
@@ -73,6 +77,8 @@ class ClaudeRunner:
         ]
         if self.model:
             args += ["--model", self.model]
+        if self.effort:
+            args += ["--effort", self.effort]
         if resume:
             args += ["--resume", resume]
         if allowed:
