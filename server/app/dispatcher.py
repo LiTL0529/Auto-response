@@ -32,7 +32,7 @@ OWNER_HELP = HELP_TEXT + """
 同意 12 —— 开始执行大改动 / 确认部署
 拒绝 12 —— 不做 / 暂不部署
 部署 项目id —— 手动部署某个项目
-授权 kf:xxx 名字 —— 允许新用户提需求
+授权 账号 名字 —— 允许这个人在当前应用里提需求（账号见通讯录成员详情，如：授权 TangMuMao 汤姆猫）
 用户 —— 查看已授权用户"""
 
 COMMANDS = [
@@ -41,7 +41,8 @@ COMMANDS = [
     ("cancel", re.compile(r"^取消\s*#?(\d+)$")),
     ("status", re.compile(r"^(?:进度|状态|任务)\s*#?(\d+)?$")),
     ("deploy", re.compile(r"^部署\s+(\S+)$")),
-    ("grant", re.compile(r"^授权\s+([a-z][a-z0-9]*:\S+)(?:\s+(\S+))?$")),
+    # 「授权 kf:xxx 名字」「授权 TangMuMao 汤姆猫」「授权给TangMuMao」都可以；不写渠道时授权到发指令的那个应用
+    ("grant", re.compile(r"^授权(?:给)?[\s:：]*((?:[a-z][a-z0-9]*:)?[A-Za-z0-9][A-Za-z0-9_.@-]*)(?:\s+(\S+))?$")),
     ("users", re.compile(r"^用户$")),
     ("help", re.compile(r"^(?:帮助|help|\?|？)$", re.I)),
 ]
@@ -205,6 +206,14 @@ class Dispatcher:
             cmd = parse_command(item.text)
             if cmd:
                 await self.run_command(item.uid, *cmd)
+                return
+            if self.is_owner(item.uid) and item.text.strip().startswith("授权"):
+                # 负责人的授权指令写法不对时提示格式，不要当成开发需求
+                await self.msg.send(
+                    item.uid,
+                    "授权指令的格式：授权 账号 名字\n例如：授权 TangMuMao 汤姆猫\n"
+                    "账号在企业微信后台「通讯录 → 点成员」里看；授权只对当前这个应用生效。",
+                )
                 return
 
         # 连续消息先缓存，停顿一会儿后一起理解（微信里一句话常被拆成好几条发）
@@ -392,6 +401,13 @@ class Dispatcher:
             await self.start_deploy(args[0], [], uid)
         elif name == "grant":
             target, uname = args[0], args[1] or ""
+            if ":" not in target:
+                channel = uid.partition(":")[0]
+                target = f"{channel}:{target}"
+            if not uname:
+                # 在别的应用里授权过的同一个人，沿用那边的名字
+                ident = target.partition(":")[2]
+                uname = next((u["name"] for u in self.db.list_users() if u["uid"].partition(":")[2] == ident and u["name"]), "")
             pending_kfid = self.db.kv_get(f"pending_kfid:{target}")
             self.db.upsert_user(target, "friend", uname, {"open_kfid": pending_kfid} if pending_kfid else None)
             await self.msg.send(uid, f"已授权 {uname or target}，ta 现在可以提需求了。")
