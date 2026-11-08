@@ -54,16 +54,29 @@ class ServerAPI:
         log.error("任务 %s 的结果最终没有送达：%s", job_id, result)
         return False
 
-    def upload(self, path: str | Path) -> str:
+    # 上传时 2 分钟没有任何进展就判定卡住（之前是 30 分钟，网络一卡整个 Agent 就被占住）
+    UPLOAD_TIMEOUT = httpx.Timeout(connect=15, read=120, write=120, pool=15)
+    UPLOAD_ATTEMPTS = 3
+
+    def upload(self, path: str | Path, attempts: int | None = None) -> str:
         path = Path(path)
-        with open(path, "rb") as f:
-            data = self._post(
-                "/api/agent/files",
-                files={"file": (path.name, f, "application/octet-stream")},
-                data={"filename": path.name},
-                timeout=httpx.Timeout(1800, connect=15),
-            )
-        return data["file_id"]
+        attempts = attempts or self.UPLOAD_ATTEMPTS
+        for n in range(1, attempts + 1):
+            try:
+                with open(path, "rb") as f:
+                    data = self._post(
+                        "/api/agent/files",
+                        files={"file": (path.name, f, "application/octet-stream")},
+                        data={"filename": path.name},
+                        timeout=self.UPLOAD_TIMEOUT,
+                    )
+                return data["file_id"]
+            except (httpx.TransportError, httpx.HTTPStatusError) as e:
+                if n == attempts:
+                    raise
+                log.warning("上传 %s 失败（第 %d 次）：%s，%d 秒后重试", path.name, n, e, 5 * n)
+                time.sleep(5 * n)
+        raise RuntimeError("unreachable")
 
     def download(self, file_id: str, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)

@@ -255,3 +255,41 @@ def test_query_runs_read_only_without_git_changes(repo, monkeypatch):
 def test_query_without_config_is_refused(repo):
     res = make_runner(repo, FakeAPI()).run(job(kind="query"))
     assert not res["ok"] and "query" in res["error"]
+
+
+def test_upload_retries_then_succeeds(tmp_path, monkeypatch):
+    import httpx
+
+    from bridge_agent import api as api_mod
+
+    monkeypatch.setattr(api_mod.time, "sleep", lambda s: None)
+    calls = {"n": 0}
+
+    def handler(request):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.WriteTimeout("stalled", request=request)
+        return httpx.Response(200, json={"file_id": "f1"})
+
+    f = tmp_path / "setup.exe"
+    f.write_bytes(b"x" * 1000)
+    api = api_mod.ServerAPI("http://server", "t", transport=httpx.MockTransport(handler))
+    assert api.upload(f) == "f1" and calls["n"] == 3
+    assert api_mod.ServerAPI.UPLOAD_TIMEOUT.read == 120  # 不再是 30 分钟
+
+
+def test_upload_failure_does_not_fail_task(repo):
+    r, _, _ = repo
+    (r / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    git(r, "add", ".gitignore")
+    git(r, "commit", "-q", "-m", "ignore dist")
+    pkg_cmd = f'"{sys.executable}" -c "import os; os.makedirs(\'dist\', exist_ok=True); open(\'dist/app-setup.exe\',\'w\').write(\'x\')"'
+
+    class FailingUpload(FakeAPI):
+        def upload(self, path):
+            raise OSError("handshake timed out")
+
+    res = make_runner(repo, FailingUpload(), package=pkg_cmd, package_artifact="dist/*.exe").run(job(wants_package=True))
+    assert res["ok"] and res.get("changed"), res
+    assert "上传服务器失败" in res["package_error"] and "app-setup.exe" in res["package_error"]
+    assert not res.get("package_file_id")

@@ -178,7 +178,12 @@ class JobRunner:
         if not files:
             return None, f"打包命令成功，但没找到本次生成的文件：{p.package_artifact}"
         newest = max(files, key=os.path.getmtime)
-        return self.api.upload(newest), ""
+        try:
+            return self.api.upload(newest), ""
+        except Exception as e:  # noqa: BLE001
+            # 代码已经改好合并了，只是上传失败：不要让整个任务判失败
+            log.exception("上传安装包失败")
+            return None, f"安装包已打好但上传服务器失败（{e}），文件在家里电脑：{newest}"
 
     # ------------------------------------------------------------------ deploy
     def run_deploy(self, job: dict, p: Project) -> dict:
