@@ -40,6 +40,22 @@ class ExtraApp:
 
 
 @dataclass
+class ExtraBot:
+    """企业微信「智能机器人」（长连接模式）：拉进群里，被 @ 时干活，结果发回群里。"""
+
+    key: str  # 渠道名，用户 uid 形如 "<key>:<userid>"
+    name: str
+    bot_id: str
+    secret: str
+    projects: list[str] = field(default_factory=list)  # 只处理这些项目；空 = 全部
+    notify_app: str = ""  # 需要负责人处理的消息，同时私信到这个应用（如 dx），保证手机有推送
+
+    def missing(self) -> list[str]:
+        p = f"WECOM_{self.key.upper()}_"
+        return [k for k, v in {p + "BOT_ID": self.bot_id, p + "SECRET": self.secret}.items() if not v]
+
+
+@dataclass
 class Settings:
     # 企业微信
     corp_id: str
@@ -68,6 +84,8 @@ class Settings:
     app_projects: list[str] = field(default_factory=list)
     # 额外的自建应用（WECOM_APPS=dx,lab，每个再配 WECOM_<KEY>_* 一组变量）
     extra_apps: list[ExtraApp] = field(default_factory=list)
+    # 智能机器人（WECOM_BOTS=dxbot，每个再配 WECOM_<KEY>_BOT_ID / _SECRET / _PROJECTS / _NAME / _NOTIFY_APP）
+    bots: list[ExtraBot] = field(default_factory=list)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -83,6 +101,19 @@ class Settings:
                     callback_token=_env(p + "CALLBACK_TOKEN"),
                     encoding_aes_key=_env(p + "ENCODING_AES_KEY"),
                     projects=_list(_env(p + "PROJECTS")),
+                )
+            )
+        bots = []
+        for key in _list(_env("WECOM_BOTS").lower()):
+            p = f"WECOM_{key.upper()}_"
+            bots.append(
+                ExtraBot(
+                    key=key,
+                    name=_env(p + "NAME", key),
+                    bot_id=_env(p + "BOT_ID"),
+                    secret=_env(p + "SECRET"),
+                    projects=_list(_env(p + "PROJECTS")),
+                    notify_app=_env(p + "NOTIFY_APP").lower(),
                 )
             )
         return cls(
@@ -103,6 +134,7 @@ class Settings:
             agent_offline_alert_minutes=int(_env("AGENT_OFFLINE_ALERT_MINUTES", "10")),
             app_projects=_list(_env("WECOM_PROJECTS")),
             extra_apps=extra,
+            bots=bots,
         )
 
     def missing(self) -> list[str]:
@@ -121,4 +153,11 @@ class Settings:
             if not re.fullmatch(r"[a-z][a-z0-9]{0,15}", a.key) or a.key in RESERVED_CHANNELS:
                 out.append(f"WECOM_APPS 里的「{a.key}」（只能用小写字母和数字，且不能是 app / kf）")
             out += a.missing()
+        app_keys = {MAIN_CHANNEL} | {a.key for a in self.extra_apps}
+        for b in self.bots:
+            if not re.fullmatch(r"[a-z][a-z0-9]{0,15}", b.key) or b.key in RESERVED_CHANNELS or b.key in app_keys:
+                out.append(f"WECOM_BOTS 里的「{b.key}」（只能用小写字母和数字，且不能和应用渠道重名）")
+            if b.notify_app and b.notify_app not in app_keys:
+                out.append(f"WECOM_{b.key.upper()}_NOTIFY_APP（「{b.notify_app}」不是已配置的应用）")
+            out += b.missing()
         return out

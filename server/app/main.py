@@ -13,6 +13,7 @@ import asyncio
 import hmac
 import logging
 import os
+import re
 import time
 from contextlib import asynccontextmanager
 
@@ -26,6 +27,7 @@ from .db import Database
 from .dispatcher import Dispatcher, Incoming, Messenger
 from .files import FileStore
 from .triage import Triage
+from .wecom.aibot import AiBotConnection
 from .wecom.client import WeComClient
 from .wecom.crypto import WeComCrypto, WeComCryptoError, parse_xml
 
@@ -53,6 +55,7 @@ class App:
         http: httpx.AsyncClient,
         wecom: WeComClient | None = None,
         extra_wecom: dict[str, WeComClient] | None = None,
+        extra_bots: dict | None = None,
     ):
         os.makedirs(settings.data_dir, exist_ok=True)
         self.settings = settings
@@ -69,11 +72,25 @@ class App:
         self.files = FileStore(
             os.path.join(settings.data_dir, "files"), self.db, settings.agent_token, settings.public_base_url, settings.file_link_ttl_hours
         )
-        for channel in self.clients:
+        # 智能机器人（群里 @ 它干活）；测试时可以传入假的连接
+        self.bots: dict = {}
+        for b in settings.bots:
+            self.bots[b.key] = (extra_bots or {}).get(b.key) or AiBotConnection(
+                b.key, b.bot_id, b.secret, self.handle_bot_message
+            )
+        for channel in [*self.clients, *self.bots]:
             owner_uid = f"{channel}:{settings.owner_userid}"
             self.db.upsert_user(owner_uid, "owner", (self.db.get_user(owner_uid) or {}).get("name") or "负责人")
         extra_clients = {k: c for k, c in self.clients.items() if k != MAIN_CHANNEL}
-        self.messenger = Messenger(self.wecom, self.db, settings.owner_userid, extra_clients)
+        self.messenger = Messenger(
+            self.wecom,
+            self.db,
+            settings.owner_userid,
+            extra_clients,
+            bots=self.bots,
+            bot_notify={b.key: b.notify_app for b in settings.bots if b.notify_app},
+            bot_names={b.key: b.name for b in settings.bots},
+        )
         self.triage = Triage(settings.dashscope_api_key, settings.dashscope_base_url, settings.qwen_model, http)
         self.dispatcher = Dispatcher(
             self.db,
@@ -82,7 +99,11 @@ class App:
             self.files,
             settings.merge_window_seconds,
             settings.agent_offline_alert_minutes,
-            channel_projects={MAIN_CHANNEL: settings.app_projects, **{a.key: a.projects for a in settings.extra_apps}},
+            channel_projects={
+                MAIN_CHANNEL: settings.app_projects,
+                **{a.key: a.projects for a in settings.extra_apps},
+                **{b.key: b.projects for b in settings.bots},
+            },
         )
 
     # ---- 回调处理 ----
@@ -105,6 +126,57 @@ class App:
             await self.dispatcher.handle_incoming(Incoming(uid=uid, file_id=file_id, filename=name))
         else:
             await self.messenger.send(uid, "暂时只支持文字和图片消息～")
+
+    # ---- 智能机器人消息（长连接推过来的 aibot_msg_callback body）----
+    @staticmethod
+    def _strip_mentions(text: str) -> str:
+        """去掉开头的「@机器人」（以及连着的其他 @）。"""
+        return re.sub(r"^(\s*@\S+)+\s*", "", text or "").strip()
+
+    async def handle_bot_message(self, key: str, body: dict) -> None:
+        msgid = body.get("msgid") or ""
+        if msgid and not self.db.mark_seen(f"{key}:{msgid}"):
+            return
+        userid = (body.get("from") or {}).get("userid") or ""
+        if not userid:
+            return
+        uid = f"{key}:{userid}"
+        if body.get("chattype") == "group" and body.get("chatid"):
+            self.messenger.remember_chat(uid, body["chatid"], 2)
+        else:
+            self.messenger.remember_chat(uid, userid, 1)
+
+        texts: list[str] = []
+        images: list[dict] = []
+        mtype = body.get("msgtype")
+        if mtype == "text":
+            texts.append(self._strip_mentions((body.get("text") or {}).get("content", "")))
+        elif mtype == "mixed":
+            for item in (body.get("mixed") or {}).get("msg_item") or []:
+                if item.get("msgtype") == "text":
+                    texts.append(self._strip_mentions((item.get("text") or {}).get("content", "")))
+                elif item.get("msgtype") == "image":
+                    images.append(item.get("image") or {})
+        elif mtype == "image":
+            images.append(body.get("image") or {})
+        else:
+            await self.messenger.send(uid, "暂时只支持文字和图片～在群里请把图片和文字放在同一条消息里 @我。")
+            return
+        quote = (((body.get("quote") or {}).get("text")) or {}).get("content")
+        text = "\n".join(t for t in texts if t)
+        if quote:
+            text = f"{text}\n（引用的消息：{quote[:500]}）".strip()
+
+        for img in images:
+            try:
+                data = await AiBotConnection.download(self.http, img["url"], img.get("aeskey"))
+                file_id = self.files.save_bytes(data, "image.png", "image/png")
+                await self.dispatcher.handle_incoming(Incoming(uid=uid, file_id=file_id, filename="image.png"))
+            except Exception:  # noqa: BLE001
+                log.exception("下载机器人消息里的图片失败")
+                text = (text + "\n[有一张图片没能下载]").strip()
+        if text or not images:
+            await self.dispatcher.handle_incoming(Incoming(uid=uid, text=text or "帮助"))
 
     async def sync_kf(self, open_kfid: str, token: str | None) -> None:
         cursor_key = f"kf_cursor:{open_kfid}"
@@ -153,6 +225,7 @@ def create_app(
     settings: Settings | None = None,
     wecom: WeComClient | None = None,
     extra_wecom: dict[str, WeComClient] | None = None,
+    extra_bots: dict | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     missing = settings.missing()
@@ -164,13 +237,17 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         http = httpx.AsyncClient(timeout=30)
-        core = App(settings, http, wecom, extra_wecom)
+        core = App(settings, http, wecom, extra_wecom, extra_bots)
+        for bot in core.bots.values():
+            bot.start()
         state["core"] = core
         app.state.core = core
         monitor = asyncio.create_task(core.dispatcher.monitor_loop())
         log.info("服务启动，项目数：%d，应用：%s", len(core.dispatcher.projects()), "、".join(core.clients))
         yield
         monitor.cancel()
+        for bot in core.bots.values():
+            await bot.stop()
         await http.aclose()
 
     app = FastAPI(title="Auto-response bridge", lifespan=lifespan)
@@ -281,6 +358,7 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz():
-        return {"ok": True, "agent_online": core().dispatcher.agent_online()}
+        bots = {k: b.connected for k, b in core().bots.items()}
+        return {"ok": True, "agent_online": core().dispatcher.agent_online(), **({"bots": bots} if bots else {})}
 
     return app

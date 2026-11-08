@@ -69,23 +69,75 @@ class Incoming:
         return self.text if self.text is not None else f"[图片:{self.filename or self.file_id}]"
 
 
-class Messenger:
-    """按用户来源（哪个自建应用 / 微信客服）选择发送通道。uid 形如 "<渠道>:<id>"。"""
+OWNER_TAG = "#owner"  # 智能机器人渠道：「<渠道>:<userid>#owner」= 在这个人所在的会话里 @负责人
 
-    def __init__(self, wecom: WeComClient, db: Database, owner_userid: str, apps: dict[str, WeComClient] | None = None):
+
+class Messenger:
+    """按用户来源（哪个自建应用 / 智能机器人 / 微信客服）选择发送通道。uid 形如 "<渠道>:<id>"。"""
+
+    def __init__(
+        self,
+        wecom: WeComClient,
+        db: Database,
+        owner_userid: str,
+        apps: dict[str, WeComClient] | None = None,
+        bots: dict | None = None,
+        bot_notify: dict[str, str] | None = None,
+        bot_names: dict[str, str] | None = None,
+    ):
         self.wecom = wecom  # 主应用，也负责微信客服
         self.apps: dict[str, WeComClient] = {MAIN_CHANNEL: wecom, **(apps or {})}
+        self.bots: dict = bots or {}  # 渠道名 -> AiBotConnection
+        self.bot_notify = bot_notify or {}  # 渠道名 -> 负责人私信用的应用渠道
+        self.bot_names = bot_names or {}
         self.db = db
         self.owner_userid = owner_userid
         self.owner_uid = f"{MAIN_CHANNEL}:{owner_userid}"
 
     def owner_on(self, channel: str) -> str:
-        """负责人在某个应用里的 uid；微信客服等非应用渠道回到主应用。"""
-        return f"{channel}:{self.owner_userid}" if channel in self.apps else self.owner_uid
+        """负责人在某个应用 / 机器人里的 uid；微信客服等其他渠道回到主应用。"""
+        return f"{channel}:{self.owner_userid}" if channel in self.apps or channel in self.bots else self.owner_uid
+
+    # ---- 智能机器人：记住每个人最近在哪个会话（群 / 单聊）里说话，回复发回那里
+    def remember_chat(self, uid: str, chatid: str, chat_type: int) -> None:
+        self.db.kv_set(f"botchat:{uid}", json.dumps({"chatid": chatid, "chat_type": chat_type}))
+
+    def bot_chat(self, uid: str) -> dict | None:
+        raw = self.db.kv_get(f"botchat:{uid}")
+        return json.loads(raw) if raw else None
+
+    async def _send_bot(self, channel: str, ident: str, text: str) -> bool:
+        for_owner = ident.endswith(OWNER_TAG)
+        base_uid = f"{channel}:{ident[: -len(OWNER_TAG)] if for_owner else ident}"
+        target_uid = f"{channel}:{self.owner_userid}" if for_owner else base_uid
+        chat = self.bot_chat(base_uid) or (self.bot_chat(target_uid) if for_owner else None)
+        ok = False
+        try:
+            if not chat:
+                raise ValueError("这个人还没在群里或单聊中和机器人说过话")
+            content = text if chat["chat_type"] == 1 else f"@{self._name(target_uid)} {text}"
+            await self.bots[channel].send_markdown(chat["chatid"], chat["chat_type"], content)
+            self.db.add_message(target_uid, "out", text)
+            ok = True
+        except Exception as e:  # noqa: BLE001
+            log.exception("机器人 %s 发送给 %s 失败", channel, target_uid)
+            if not for_owner and target_uid.partition(":")[2] != self.owner_userid:
+                await self.send(self.owner_uid, f"⚠️ 无法给 {self._name(target_uid)} 发消息：{e}\n原文：{text[:300]}")
+        if for_owner:
+            # 需要负责人处理的消息：再私信一份，保证手机上有推送（群里发送失败时也靠它兜底）
+            app = self.bot_notify.get(channel)
+            bot = self.bot_names.get(channel, channel)
+            if app:
+                await self.send(f"{app}:{self.owner_userid}", f"【{bot}】{text}")
+            elif not ok:
+                await self.send(self.owner_uid, f"【{bot}】{text}")
+        return ok
 
     async def send(self, uid: str, text: str) -> bool:
         text = plain_text(text)  # 企业微信文本消息不渲染 Markdown
         channel, _, ident = uid.partition(":")
+        if channel in self.bots:
+            return await self._send_bot(channel, ident, text)
         try:
             if channel in self.apps:
                 await self.apps[channel].send_app_text(ident, text)
@@ -151,8 +203,12 @@ class Dispatcher:
         return [p for p in projects if p["id"] in allowed] if allowed else projects
 
     def owner_for(self, uid: str) -> str:
-        """和 uid 同一个应用里的负责人（通知发到对应的应用里）。"""
-        return self.msg.owner_on(uid.partition(":")[0])
+        """和 uid 同一个应用里的负责人（通知发到对应的应用里）。
+        智能机器人：发到这个人所在的会话（通常是群）并 @负责人。"""
+        channel = uid.partition(":")[0]
+        if channel in self.msg.bots:
+            return f"{uid}{OWNER_TAG}"
+        return self.msg.owner_on(channel)
 
     def project(self, project_id: str) -> dict | None:
         return next((p for p in self.projects() if p["id"] == project_id), None)
@@ -171,7 +227,7 @@ class Dispatcher:
 
     def is_owner(self, uid: str) -> bool:
         channel, _, ident = uid.partition(":")
-        return channel in self.msg.apps and ident == self.msg.owner_userid
+        return (channel in self.msg.apps or channel in self.msg.bots) and ident == self.msg.owner_userid
 
     def format_task(self, t: dict, detail: bool = False) -> str:
         line = f"#{t['id']}【{t['title']}】{S.STATUS_LABELS.get(t['status'], t['status'])}"
