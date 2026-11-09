@@ -145,11 +145,17 @@ async function openChat(id) {
   for (const ev of d.events) render(ev);
   setStatus(d.chat.status);
   scrollDown(true);
+  if (window.innerWidth > 760) $("input").focus();
   loadChats().catch(() => {});
   state.es = new EventSource(`api/chats/${id}/stream?after=${state.lastId}`);
   state.es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
-    if (ev.type === "chat_status") return setStatus(ev.data.status);
+    if (ev.type === "chat_status") {
+      const was = state.chat?.status;
+      // 一轮结束：重新加载一次，刷新标题、回退按钮和列表
+      if (ev.data.status === "idle" && was && was !== "idle") return openChat(id);
+      return setStatus(ev.data.status);
+    }
     if (ev.reload) return openChat(id);
     if (ev.id && ev.id <= state.lastId) return;
     render(ev);
