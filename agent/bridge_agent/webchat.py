@@ -313,7 +313,9 @@ class WebChat:
             folder = self._check_folder(cmd["folder"])
             changed, backup = await asyncio.to_thread(self.snaps.restore, folder, cmd["snapshot"])
             log.info("对话 %s 回退到第 %d 条之前，变动 %d 个文件，回退前的状态保存在快照 %s", chat_id, turn, len(changed), backup)
-            await self.emit(chat_id, {"type": "rewound", "turn": turn, "ok": True, "changed": changed[:200], "backup": backup})
+            skipped = self.snaps.nested_repos(folder)
+            await self.emit(chat_id, {"type": "rewound", "turn": turn, "ok": True, "changed": changed[:200], "backup": backup,
+                                      "skipped": skipped[:50]})
         except Exception as e:  # noqa: BLE001
             log.exception("回退失败")
             await self.emit(chat_id, {"type": "rewound", "turn": turn, "ok": False, "error": str(e)})

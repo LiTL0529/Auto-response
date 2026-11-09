@@ -262,7 +262,8 @@ function render(ev) {
       add(`<div class="thumbs">${fileThumbs([d]).replace(/^<div class="thumbs">|<\/div>$/g, "")}</div><div class="small muted">${esc(d.path || "")}</div>`, "msg" + hidden);
       break;
     case "rewound":
-      add(`已回退到第 ${esc(d.turn)} 条消息之前，文件已恢复${d.changed?.length ? `（${d.changed.length} 个文件）` : ""}。可以重新发消息。`, "msg note ok");
+      add(`已回退到第 ${esc(d.turn)} 条消息之前，文件已恢复${d.changed?.length ? `（${d.changed.length} 个文件）` : ""}。可以重新发消息。`
+        + (d.skipped?.length ? `<br>注意：目录里独立的 git 仓库没有回退：${esc(d.skipped.join("、"))}` : ""), "msg note ok");
       break;
     case "notice":
       add(esc(d.text), "msg note" + hidden);

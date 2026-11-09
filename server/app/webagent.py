@@ -280,7 +280,9 @@ class WebHub:
             self.store.x("UPDATE events SET hidden=1 WHERE chat_id=? AND turn>=?", (chat_id, turn))
             self.store.x("DELETE FROM turns WHERE chat_id=? AND turn>=?", (chat_id, turn))
             self.store.update_chat(chat_id, turns=turn - 1, session_id=t.get("session_before", ""))
-            row = self.store.add_event(chat_id, turn - 1, "rewound", {"turn": turn, "changed": data.get("changed", [])})
+            row = self.store.add_event(
+                chat_id, turn - 1, "rewound", {"turn": turn, "changed": data.get("changed", []), "skipped": data.get("skipped", [])}
+            )
         else:
             row = self.store.add_event(chat_id, self._chat(chat_id)["turns"], "error", {"text": f"回退失败：{data.get('error', '')}"})
         await self.publish(chat_id, {**row, "reload": bool(data.get("ok"))})
