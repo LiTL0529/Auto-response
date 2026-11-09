@@ -109,6 +109,7 @@ class WebHub:
         self.files = files
         self.notify = notify
         self.base_url = base_url.rstrip("/")
+        self.path = "/agent"  # register() 时设置成实际的网页路径
         self.commands: list[dict] = []
         self.command_event = asyncio.Event()
         self.subscribers: dict[str, set[asyncio.Queue]] = {}
@@ -189,7 +190,7 @@ class WebHub:
         if key in self.notified:
             return
         self.notified.add(key)
-        await self.notify(f"{text}\n打开：{self.base_url}/agent/#{chat_id}")
+        await self.notify(f"{text}\n打开：{self.base_url}{self.path}/#{chat_id}")
 
     # ---------------------------------------------------------------- 推送
     async def publish(self, chat_id: str, row: dict) -> None:
@@ -409,7 +410,14 @@ def _client_ip(request: Request) -> str:
     return (request.headers.get("x-forwarded-for") or (request.client.host if request.client else "")).split(",")[0].strip()
 
 
-def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send_login_request: Callable[[dict, str, str, str], Awaitable[bool]]) -> None:
+def register(
+    app: FastAPI,
+    hub_getter: Callable[[], WebHub],
+    require_agent,
+    send_login_request: Callable[[dict, str, str, str], Awaitable[bool]],
+    prefix: str = "/agent",
+) -> None:
+    P = "/" + prefix.strip("/")  # 网页路径，如 /agent 或 /claude
     def hub() -> WebHub:
         return hub_getter()
 
@@ -423,15 +431,15 @@ def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send
             raise HTTPException(403, "bad request")
 
     # ------------------------------------------------ 页面
-    @app.get("/agent", include_in_schema=False)
+    @app.get(P + "", include_in_schema=False)
     async def agent_root():
-        return Response(status_code=308, headers={"Location": "/agent/"})
+        return Response(status_code=308, headers={"Location": P + "/"})
 
-    @app.get("/agent/", include_in_schema=False)
+    @app.get(P + "/", include_in_schema=False)
     async def agent_index():
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
-    @app.get("/agent/static/{name}", include_in_schema=False)
+    @app.get(P + "/static/{name}", include_in_schema=False)
     async def agent_static(name: str):
         path = STATIC / name
         if "/" in name or "\\" in name or not path.is_file():
@@ -439,28 +447,28 @@ def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send
         return FileResponse(path, headers={"Cache-Control": "no-cache"})
 
     # ------------------------------------------------ 登录
-    @app.post("/agent/api/login/request")
+    @app.post(P + "/api/login/request")
     async def login_request(request: Request):
         ip, ua = _client_ip(request), request.headers.get("user-agent", "")
         login, token = hub().create_login(ip, ua)
-        url = f"{hub().base_url}/agent/approve?t={token}"
+        url = f"{hub().base_url}{P}/approve?t={token}"
         if not await send_login_request(login, url, ip, ua):
             raise HTTPException(502, "发送企业微信消息失败")
         return {"id": login["id"], "code": login["code"]}
 
-    @app.get("/agent/api/login/status")
+    @app.get(P + "/api/login/status")
     async def login_status(id: str, request: Request, response: Response):
         status = hub().login_status(id)
         if status == "approved":
             session = hub().claim_login(id, _client_ip(request), request.headers.get("user-agent", ""))
             if session:
                 response.set_cookie(
-                    COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True, secure=True, samesite="strict", path="/agent"
+                    COOKIE, session, max_age=SESSION_DAYS * 86400, httponly=True, secure=True, samesite="strict", path=P
                 )
                 return {"status": "ok"}
         return {"status": status}
 
-    @app.get("/agent/approve", include_in_schema=False)
+    @app.get(P + "/approve", include_in_schema=False)
     async def approve_page(t: str = ""):
         row = hub().login_by_token(t)
         if not row:
@@ -480,40 +488,40 @@ def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send
             "button{font-size:17px;padding:10px 20px}</style><h3>网页 Agent 登录确认</h3>" + body
         )
 
-    @app.post("/agent/api/login/approve")
+    @app.post(P + "/api/login/approve")
     async def approve(body: TokenBody):
         if not hub().approve_login(body.t):
             raise HTTPException(400, "登录请求已失效")
         return {"ok": True}
 
-    @app.post("/agent/api/logout")
+    @app.post(P + "/api/logout")
     async def logout(request: Request, response: Response):
         hub().logout(request.cookies.get(COOKIE))
-        response.delete_cookie(COOKIE, path="/agent")
+        response.delete_cookie(COOKIE, path=P)
         return {"ok": True}
 
     # ------------------------------------------------ 对话
-    @app.get("/agent/api/me", dependencies=[Depends(require_user)])
+    @app.get(P + "/api/me", dependencies=[Depends(require_user)])
     async def me():
         return {"agent_online": hub().agent_online(), "folders": hub().folders, "modes": MODES}
 
-    @app.get("/agent/api/chats", dependencies=[Depends(require_user)])
+    @app.get(P + "/api/chats", dependencies=[Depends(require_user)])
     async def list_chats():
         return {"chats": hub().chats(), "agent_online": hub().agent_online()}
 
-    @app.post("/agent/api/chats", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats", dependencies=[Depends(require_user_write)])
     async def new_chat(body: NewChat):
         chat = hub().create_chat(body.folder, body.mode)
         await hub().publish_list()
         return chat
 
-    @app.get("/agent/api/chats/{chat_id}", dependencies=[Depends(require_user)])
+    @app.get(P + "/api/chats/{chat_id}", dependencies=[Depends(require_user)])
     async def get_chat(chat_id: str):
         chat = hub()._chat(chat_id)
         turns = [r["turn"] for r in hub().store.q("SELECT turn FROM turns WHERE chat_id=? AND snapshot!=''", (chat_id,))]
         return {"chat": chat, "events": hub().store.events(chat_id), "rewindable": turns}
 
-    @app.get("/agent/api/chats/{chat_id}/stream", dependencies=[Depends(require_user)])
+    @app.get(P + "/api/chats/{chat_id}/stream", dependencies=[Depends(require_user)])
     async def stream(chat_id: str, after: int = 0):
         hub()._chat(chat_id)
         q: asyncio.Queue = asyncio.Queue()
@@ -535,7 +543,7 @@ def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/agent/api/events", dependencies=[Depends(require_user)])
+    @app.get(P + "/api/events", dependencies=[Depends(require_user)])
     async def list_stream():
         q: asyncio.Queue = asyncio.Queue()
         hub().list_subscribers.add(q)
@@ -554,44 +562,44 @@ def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send
 
         return StreamingResponse(gen(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.post("/agent/api/chats/{chat_id}/messages", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/messages", dependencies=[Depends(require_user_write)])
     async def send(chat_id: str, body: SendMessage):
         if not body.text.strip() and not body.files:
             raise HTTPException(400, "消息是空的")
         return await hub().user_message(chat_id, body.text, body.files)
 
-    @app.post("/agent/api/chats/{chat_id}/stop", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/stop", dependencies=[Depends(require_user_write)])
     async def stop(chat_id: str):
         hub().stop(chat_id)
         return {"ok": True}
 
-    @app.post("/agent/api/chats/{chat_id}/permission", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/permission", dependencies=[Depends(require_user_write)])
     async def permission(chat_id: str, body: PermissionDecision):
         await hub().permission(chat_id, body.request_id, body.allow, body.always)
         return {"ok": True}
 
-    @app.post("/agent/api/chats/{chat_id}/mode", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/mode", dependencies=[Depends(require_user_write)])
     async def mode(chat_id: str, body: ModeBody):
         await hub().set_mode(chat_id, body.mode)
         return {"ok": True}
 
-    @app.post("/agent/api/chats/{chat_id}/rewind", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/rewind", dependencies=[Depends(require_user_write)])
     async def rewind(chat_id: str, body: RewindBody):
         await hub().rewind(chat_id, body.turn)
         return {"ok": True}
 
-    @app.post("/agent/api/chats/{chat_id}/fetch", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/fetch", dependencies=[Depends(require_user_write)])
     async def fetch(chat_id: str, body: FetchBody):
         hub().fetch_file(chat_id, body.path)
         return {"ok": True}
 
-    @app.post("/agent/api/chats/{chat_id}/archive", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/chats/{chat_id}/archive", dependencies=[Depends(require_user_write)])
     async def archive(chat_id: str):
         hub().archive(chat_id)
         await hub().publish_list()
         return {"ok": True}
 
-    @app.post("/agent/api/upload", dependencies=[Depends(require_user_write)])
+    @app.post(P + "/api/upload", dependencies=[Depends(require_user_write)])
     async def upload(file: UploadFile = File(...)):
         fid = await hub().files.save_upload(file, file.filename or "file", file.content_type or "application/octet-stream")
         f = hub().files.db.get_file(fid)
@@ -600,7 +608,7 @@ def register(app: FastAPI, hub_getter: Callable[[], WebHub], require_agent, send
             raise HTTPException(413, "文件太大（上限 50 MB）")
         return {"file_id": fid, "name": f["filename"], "content_type": f["content_type"], "size": f["size"]}
 
-    @app.get("/agent/api/files/{file_id}", dependencies=[Depends(require_user)])
+    @app.get(P + "/api/files/{file_id}", dependencies=[Depends(require_user)])
     async def get_file(file_id: str):
         f = hub().files.db.get_file(file_id)
         if not f:

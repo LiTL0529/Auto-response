@@ -5,7 +5,7 @@
 - GET/POST /wecom/callback/<k>  额外自建应用 <k> 的回调（WECOM_APPS 里配置）
 - /api/agent/*                  家里电脑 Agent 调用（Bearer AGENT_TOKEN）
 - GET /files/{id}/{name}        签名下载链接（安装包、截图）
-- /agent/                       网页 Agent（企业微信确认登录后，在网页上和家里电脑的 Claude Code 对话）
+- /agent/（WEB_AGENT_PATH）       网页 Agent（企业微信确认登录后，在网页上和家里电脑的 Claude Code 对话）
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from .wecom.crypto import WeComCrypto, WeComCryptoError, parse_xml
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("bridge")
 
+WEB_AGENT_PATH = "/" + os.environ.get("WEB_AGENT_PATH", "agent").strip("/")  # 网页 Agent 的路径
 KF_MAX_AGE_SECONDS = 600  # 首次同步微信客服时会拉到 3 天内的旧消息，忽略 10 分钟前的
 
 
@@ -100,6 +101,7 @@ class App:
             lambda text: self.messenger.send(owner_main, text),
             settings.public_base_url,
         )
+        self.web.path = WEB_AGENT_PATH
         self.triage = Triage(settings.dashscope_api_key, settings.dashscope_base_url, settings.qwen_model, http)
         self.dispatcher = Dispatcher(
             self.db,
@@ -372,7 +374,7 @@ def create_app(
         )
         return await core().messenger.send(f"{MAIN_CHANNEL}:{settings.owner_userid}", text)
 
-    webagent.register(app, lambda: core().web, require_agent, send_login_request)
+    webagent.register(app, lambda: core().web, require_agent, send_login_request, WEB_AGENT_PATH)
 
     @app.get("/healthz")
     async def healthz():
