@@ -77,7 +77,23 @@ def check(cfg: Config, api: ServerAPI) -> int:
     return 0 if ok else 1
 
 
-def serve(cfg: Config, api: ServerAPI) -> None:
+def start_webchat(cfg: Config, data_dir: Path) -> None:
+    """网页 Agent（独立线程，自己的连接）。没配 web_folders 或没装 SDK 时不启用。"""
+    if not cfg.web_folders:
+        return
+    try:
+        import claude_agent_sdk  # noqa: F401
+    except ImportError:
+        log.warning("配置了 web_folders，但没有安装 claude-agent-sdk，网页 Agent 未启用")
+        return
+    from .webchat import WebChat
+
+    WebChat(cfg, ServerAPI(cfg.server_url, cfg.agent_token), data_dir).start()
+
+
+def serve(cfg: Config, api: ServerAPI, data_dir: Path | None = None) -> None:
+    if data_dir:
+        start_webchat(cfg, data_dir)
     claude = ClaudeRunner(cfg.claude_path, cfg.claude_model, cfg.use_api_key, cfg.max_turns, cfg.claude_effort)
     runner = JobRunner(cfg, api, claude)
     projects = [p.public_info() for p in cfg.projects]
@@ -128,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         return check(cfg, api)
     try:
-        serve(cfg, api)
+        serve(cfg, api, config_path.parent / "web-data")
     except KeyboardInterrupt:
         log.info("已退出")
     return 0

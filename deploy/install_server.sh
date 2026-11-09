@@ -136,6 +136,7 @@ location ^~ /wecom/     { include /www/server/panel/vhost/nginx/extension/auto-r
 location ^~ /api/agent/ { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
 location ^~ /files/     { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
 location = /healthz     { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
+location ^~ /agent      { include /www/server/panel/vhost/nginx/extension/auto-response-proxy.inc; }
 EOF
     cat > "$BT_VHOST/extension/auto-response-proxy.inc" <<'EOF'
 proxy_pass http://127.0.0.1:8000;

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>网页 Agent</title>
+<link rel="stylesheet" href="static/style.css">
+</head>
+<body>
+<div id="login" class="login hidden">
+  <div class="login-card">
+    <h1>网页 Agent</h1>
+    <p class="muted">在这里和家里电脑上的 Claude Code 对话。登录需要在企业微信里确认。</p>
+    <button id="loginBtn" class="primary">发送登录请求到企业微信</button>
+    <div id="loginWait" class="hidden">
+      <p>已发到你的企业微信，请在手机上打开链接确认。</p>
+      <p>验证码 <b id="loginCode" class="code"></b>（确认时核对一致）</p>
+      <p class="muted" id="loginHint">等待确认…</p>
+    </div>
+    <p id="loginErr" class="err"></p>
+  </div>
+</div>
+
+<div id="app" class="app hidden">
+  <aside id="side" class="side">
+    <div class="side-head">
+      <button id="newBtn" class="primary">＋ 新对话</button>
+      <button id="closeSide" class="icon only-mobile" title="关闭">✕</button>
+    </div>
+    <div id="agentState" class="agent-state"></div>
+    <ul id="chatList" class="chat-list"></ul>
+    <div class="side-foot"><button id="logoutBtn" class="link">退出登录</button></div>
+  </aside>
+
+  <main class="main">
+    <header class="top">
+      <button id="openSide" class="icon only-mobile" title="对话列表">☰</button>
+      <div class="top-title">
+        <div id="chatTitle">选择或新建一个对话</div>
+        <div id="chatFolder" class="muted small"></div>
+      </div>
+      <div class="top-actions">
+        <select id="modeSel" title="权限模式" class="hidden">
+          <option value="acceptEdits">自动改文件，命令需批准</option>
+          <option value="default">每步都需批准</option>
+          <option value="plan">只做计划，不改动</option>
+          <option value="bypassPermissions">全部自动（危险）</option>
+        </select>
+        <button id="fetchBtn" class="hidden" title="把电脑上的文件取回来下载">取回文件</button>
+        <button id="archiveBtn" class="hidden" title="从列表中移除">归档</button>
+      </div>
+    </header>
+
+    <div id="messages" class="messages">
+      <div class="empty muted">左边选一个对话，或点「新对话」选择项目目录开始。</div>
+    </div>
+
+    <div id="statusBar" class="status-bar hidden">
+      <span class="dot"></span><span id="statusText"></span>
+      <button id="stopBtn" class="danger small-btn">停止</button>
+    </div>
+
+    <footer id="composer" class="composer hidden">
+      <div id="attachList" class="attach-list"></div>
+      <div class="compose-row">
+        <label class="icon attach" title="添加图片或文件">📎<input id="fileInput" type="file" multiple hidden></label>
+        <textarea id="input" rows="1" placeholder="给 Claude 发消息（Enter 发送，Shift+Enter 换行，可粘贴截图）"></textarea>
+        <button id="sendBtn" class="primary">发送</button>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<dialog id="newDlg">
+  <form method="dialog" class="dlg">
+    <h3>新对话</h3>
+    <label>项目目录<select id="folderSel"></select></label>
+    <label>权限模式
+      <select id="newMode">
+        <option value="acceptEdits">自动改文件，命令需批准（推荐）</option>
+        <option value="default">每步都需批准</option>
+        <option value="plan">只做计划，不改动</option>
+        <option value="bypassPermissions">全部自动（危险）</option>
+      </select>
+    </label>
+    <div class="dlg-actions"><button value="cancel">取消</button><button id="createBtn" value="ok" class="primary">开始</button></div>
+  </form>
+</dialog>
+
+<script src="static/app.js"></script>
+</body>
+</html>

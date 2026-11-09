@@ -5,6 +5,7 @@
 - GET/POST /wecom/callback/<k>  额外自建应用 <k> 的回调（WECOM_APPS 里配置）
 - /api/agent/*                  家里电脑 Agent 调用（Bearer AGENT_TOKEN）
 - GET /files/{id}/{name}        签名下载链接（安装包、截图）
+- /agent/                       网页 Agent（企业微信确认登录后，在网页上和家里电脑的 Claude Code 对话）
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from .db import Database
 from .dispatcher import Dispatcher, Incoming, Messenger
 from .files import FileStore
 from .triage import Triage
+from . import webagent
 from .wecom.aibot import AiBotConnection
 from .wecom.client import WeComClient
 from .wecom.crypto import WeComCrypto, WeComCryptoError, parse_xml
@@ -90,6 +92,13 @@ class App:
             bots=self.bots,
             bot_notify={b.key: b.notify_app for b in settings.bots if b.notify_app},
             bot_names={b.key: b.name for b in settings.bots},
+        )
+        owner_main = f"{MAIN_CHANNEL}:{settings.owner_userid}"
+        self.web = webagent.WebHub(
+            webagent.WebStore(os.path.join(settings.data_dir, "webagent.db")),
+            self.files,
+            lambda text: self.messenger.send(owner_main, text),
+            settings.public_base_url,
         )
         self.triage = Triage(settings.dashscope_api_key, settings.dashscope_base_url, settings.qwen_model, http)
         self.dispatcher = Dispatcher(
@@ -355,6 +364,15 @@ def create_app(
         if not f:
             raise HTTPException(404)
         return FileResponse(f["path"], media_type=f["content_type"], filename=f["filename"])
+
+    async def send_login_request(login: dict, url: str, ip: str, ua: str) -> bool:
+        text = (
+            f"🔐 有浏览器请求登录网页 Agent\n验证码：{login['code']}\nIP：{ip}\n"
+            f"如果是你本人在操作，打开链接确认（5 分钟内有效）：\n{url}\n不是你就忽略这条消息。"
+        )
+        return await core().messenger.send(f"{MAIN_CHANNEL}:{settings.owner_userid}", text)
+
+    webagent.register(app, lambda: core().web, require_agent, send_login_request)
 
     @app.get("/healthz")
     async def healthz():

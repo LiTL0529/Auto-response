@@ -9,3 +9,4 @@ logs/
 *.db
 .env
 agent/config.yaml
+agent/web-data/

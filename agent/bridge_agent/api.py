@@ -78,6 +78,29 @@ class ServerAPI:
                 time.sleep(5 * n)
         raise RuntimeError("unreachable")
 
+    # ------------------------------------------------ 网页 Agent
+    def web_hello(self, folders: list[dict], startup: bool) -> None:
+        self._post("/api/agent/web/hello", json={"folders": folders, "startup": startup})
+
+    def web_next(self, wait: int = 25) -> list[dict]:
+        r = self.http.get("/api/agent/web/next", params={"wait": wait})
+        r.raise_for_status()
+        return r.json().get("commands") or []
+
+    def web_events(self, chat_id: str, events: list[dict], attempts: int = 8) -> None:
+        """事件要按顺序送达：失败就重试（最多约 2 分钟），不跳过。"""
+        delay = 1.0
+        for n in range(1, attempts + 1):
+            try:
+                self._post("/api/agent/web/events", json={"chat_id": chat_id, "events": events})
+                return
+            except Exception as e:  # noqa: BLE001
+                if n == attempts:
+                    log.error("网页对话 %s 的事件没有送达：%s", chat_id, e)
+                    return
+                time.sleep(delay)
+                delay = min(delay * 2, 30)
+
     def download(self, file_id: str, dest: Path) -> Path:
         dest.parent.mkdir(parents=True, exist_ok=True)
         with self.http.stream("GET", f"/api/agent/files/{file_id}") as r:

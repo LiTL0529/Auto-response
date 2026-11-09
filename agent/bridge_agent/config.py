@@ -79,6 +79,8 @@ class Config:
     use_api_key: bool = False  # False：强制使用订阅账号登录（会去掉 ANTHROPIC_API_KEY 环境变量）
     log_dir: str = "logs"
     extra_prompt: str = ""
+    # 网页 Agent 可以工作的目录：[{path: D:\xxx, name: 显示名}]，留空则不启用网页 Agent
+    web_folders: list = field(default_factory=list)
 
     def project(self, project_id: str) -> Project | None:
         return next((p for p in self.projects if p.id == project_id), None)
@@ -107,5 +109,14 @@ def load_config(path: str | os.PathLike) -> Config:
     cfg.claude_effort = (cfg.claude_effort or "").strip().lower()
     if cfg.claude_effort and cfg.claude_effort not in EFFORT_LEVELS:
         raise ValueError(f"claude_effort 只能是 {' / '.join(EFFORT_LEVELS)}，或留空")
+    folders = []
+    for f in cfg.web_folders or []:
+        f = {"path": f} if isinstance(f, str) else dict(f)
+        if not f.get("path") or not Path(f["path"]).is_dir():
+            raise ValueError(f"web_folders 里的目录不存在：{f.get('path')}")
+        f["path"] = str(Path(f["path"]).resolve())
+        f["name"] = f.get("name") or Path(f["path"]).name
+        folders.append({"path": f["path"], "name": f["name"]})
+    cfg.web_folders = folders
     cfg.server_url = cfg.server_url.rstrip("/")
     return cfg
