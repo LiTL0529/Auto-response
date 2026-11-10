@@ -56,17 +56,45 @@ function md(src) {
     .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
     .replace(/\[([^\]\n]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
   const out = [];
-  let list = null;
-  for (const line of s.split("\n")) {
+  let list = null; // { tag: "ul" | "ol", items: [] }
+  const flush = () => { if (list) { out.push(`<${list.tag}>${list.items.join("")}</${list.tag}>`); list = null; } };
+  const cells = (row) => row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+  const SEP = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
+  const lines = s.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // 表格：表头行 + 分隔行（|---|:--:|）+ 若干数据行
+    if (line.includes("|") && i + 1 < lines.length && SEP.test(lines[i + 1]) && lines[i + 1].includes("-")) {
+      flush();
+      const head = cells(line);
+      const align = cells(lines[i + 1]).map((c) => (c.startsWith(":") && c.endsWith(":") ? "center" : c.endsWith(":") ? "right" : ""));
+      const td = (tag, c, k) => `<${tag}${align[k] ? ` style="text-align:${align[k]}"` : ""}>${c}</${tag}>`;
+      const rows = [];
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) rows.push(cells(lines[i++]));
+      i--;
+      out.push(`<div class="table-wrap"><table><thead><tr>${head.map((c, k) => td("th", c, k)).join("")}</tr></thead>`
+        + `<tbody>${rows.map((r) => `<tr>${head.map((_, k) => td("td", r[k] ?? "", k)).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
     const h = line.match(/^(#{1,4})\s+(.*)$/);
-    const li = line.match(/^\s*(?:[-*+]|\d+\.)\s+(.*)$/);
-    if (li) { if (!list) { list = []; } list.push(`<li>${li[1]}</li>`); continue; }
-    if (list) { out.push(`<ul>${list.join("")}</ul>`); list = null; }
+    const ul = line.match(/^\s*[-*+]\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    if (ul || ol) {
+      const tag = ul ? "ul" : "ol";
+      if (list && list.tag !== tag) flush();
+      if (!list) list = { tag, items: [] };
+      list.items.push(`<li>${(ul || ol)[1]}</li>`);
+      continue;
+    }
+    flush();
     if (h) out.push(`<h${h[1].length + 1}>${h[2]}</h${h[1].length + 1}>`);
+    else if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) out.push("<hr>");
+    else if (/^&gt;\s?/.test(line)) out.push(`<blockquote>${line.replace(/^&gt;\s?/, "")}</blockquote>`);
     else if (line.trim() === "") out.push("");
     else out.push(`<p>${line}</p>`);
   }
-  if (list) out.push(`<ul>${list.join("")}</ul>`);
+  flush();
   return out.join("\n").replace(/\u0000(\d+)\u0000/g, (_, i) => `<pre><code>${blocks[+i]}</code></pre>`);
 }
 
