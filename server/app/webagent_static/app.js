@@ -16,6 +16,20 @@ function fillSettings(modelSel, effortSel, model, effort) {
   modelSel.value = model || "";
   effortSel.value = effort || "";
 }
+const svg = (d) => `<svg viewBox="0 0 24 24"><path d="${d}"/></svg>`;
+const ICON = {
+  folder: svg("M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"),
+  file: svg("M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8zM14 3v5h5"),
+  up: svg("M15 6l-6 6 6 6"),
+};
+function ago(ts) {
+  const s = Date.now() / 1000 - ts;
+  if (s < 60) return "刚刚";
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+  if (s < 86400) return `${Math.floor(s / 3600)} 小时前`;
+  const d = new Date(ts * 1000);
+  return `${d.getMonth() + 1}月${d.getDate()}日`;
+}
 function fmtTokens(n) { n = +n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n); }
 function fmtSize(n) { n = +n || 0; return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B"; }
 
@@ -99,13 +113,16 @@ async function loadChats() {
   for (const c of d.chats) {
     const li = document.createElement("li");
     li.className = c.id === state.chatId ? "active" : "";
-    const name = (state.folders.find((f) => f.path === c.folder) || {}).name || c.folder;
-    li.innerHTML = `<div class="t"><span class="badge ${esc(c.status)}"></span>${esc(c.title)}</div><div class="f">${esc(name)}</div>`;
+    const name = (state.folders.find((f) => f.path === c.folder) || {}).name || c.folder.split(/[\\/]/).pop();
+    li.innerHTML = `<div class="t"><span class="name">${esc(c.title)}</span><span class="badge ${esc(c.status)}"></span></div>
+      <div class="f"><span class="where">${esc(name)}</span><span class="when">${ago(c.updated_at)}</span></div>`;
     li.onclick = () => { location.hash = c.id; $("side").classList.remove("open"); };
     ul.appendChild(li);
   }
+  if (!d.chats.length) ul.innerHTML = '<li class="none">还没有对话</li>';
   const st = $("agentState");
-  st.textContent = d.agent_online ? "● 家里电脑在线" : "● 家里电脑离线，暂时不能对话";
+  st.textContent = d.agent_online ? "家里电脑在线" : "家里电脑离线";
+  st.title = d.agent_online ? "" : "家里电脑的 Agent 不在线，暂时不能对话";
   st.className = "agent-state" + (d.agent_online ? "" : " off");
 }
 
@@ -134,6 +151,19 @@ $("createBtn").onclick = async (e) => {
 };
 $("openSide").onclick = () => $("side").classList.add("open");
 $("closeSide").onclick = () => $("side").classList.remove("open");
+$("scrim").onclick = () => $("side").classList.remove("open");
+
+const EMPTY = `<div class="empty">
+  <div class="logo lg"><svg viewBox="0 0 24 24"><path d="M7 9l4 3-4 3M13 16h4"/></svg></div>
+  <h2>有什么要做的？</h2>
+  <p>选一个项目目录，让家里电脑上的 Claude Code 帮你读代码、改代码、回答问题。</p>
+  <button class="btn primary" onclick="document.getElementById('newBtn').click()">开始新对话</button>
+  <div class="tips">
+    <div class="tip"><b>只读提问</b>权限模式选「只读」，Claude 只看代码不改动</div>
+    <div class="tip"><b>图片和文件</b>直接粘贴截图，或拖进对话里</div>
+    <div class="tip"><b>随时回退</b>每条消息都能回到发送之前的状态</div>
+  </div>
+</div>`;
 
 // ------------------------------------------------------------------ 打开对话
 async function openChat(id) {
@@ -145,9 +175,9 @@ async function openChat(id) {
   state.lastId = 0;
   const box = $("messages");
   if (!id) {
-    box.innerHTML = '<div class="empty muted">左边选一个对话，或点「新对话」选择项目目录开始。</div>';
+    box.innerHTML = EMPTY;
     for (const el of ["composer", "modeSel", "setBtn", "ctxBtn", "filesBtn", "archiveBtn", "statusBar"]) $(el).classList.add("hidden");
-    $("chatTitle").textContent = "选择或新建一个对话";
+    $("chatTitle").textContent = "网页 Agent";
     $("chatFolder").textContent = "";
     return;
   }
@@ -198,7 +228,7 @@ function setStatus(status) {
   const busy = status === "running" || status === "waiting" || status === "rewinding";
   bar.classList.toggle("hidden", !busy);
   bar.classList.toggle("waiting", status === "waiting");
-  $("statusText").textContent = { running: "Claude 正在工作…（现在发的消息会排队，做完这一轮自动发出）", waiting: "等你批准或回答", rewinding: "正在回退文件…" }[status] || "";
+  $("statusText").textContent = { running: "Claude 正在工作，新消息会排队", waiting: "等你批准或回答", rewinding: "正在回退文件…" }[status] || "";
   $("stopBtn").classList.toggle("hidden", status === "rewinding");
   const working = BUSY.includes(status);
   $("sendBtn").disabled = status === "rewinding";
@@ -220,7 +250,8 @@ function showUsage(u) {
   if (!u || u.context_pct == null) { b.classList.add("hidden"); return; }
   b.classList.remove("hidden");
   b.textContent = `上下文 ${Math.round(u.context_pct)}%`;
-  b.className = u.context_pct >= 80 ? "warn" : "";
+  b.className = "pill ctx" + (u.context_pct >= 80 ? " warn" : "");
+  b.style.setProperty("--pct", Math.min(100, u.context_pct) + "%");
   b.title = `已用 ${fmtTokens(u.context_tokens)} / ${fmtTokens(u.context_max)} tokens。点击压缩（/compact）：把之前的对话总结成摘要，腾出空间`;
 }
 
@@ -251,13 +282,13 @@ function fileThumbs(files) {
   if (!files?.length) return "";
   return `<div class="thumbs">${files.map((f) => (f.content_type || "").startsWith("image/")
     ? `<a href="api/files/${esc(f.file_id)}" target="_blank"><img src="api/files/${esc(f.file_id)}" alt="${esc(f.name)}"></a>`
-    : `<a class="file" href="api/files/${esc(f.file_id)}">📄 ${esc(f.name)}</a>`).join("")}</div>`;
+    : `<a class="file" href="api/files/${esc(f.file_id)}?dl=1">${ICON.file}${esc(f.name)}</a>`).join("")}</div>`;
 }
 
 function toolSummary(name, input) {
   const i = input || {};
-  const v = i.command || i.file_path || i.path || i.pattern || i.url || i.description || i.query || "";
-  return `<span class="name">${esc(name)}</span> ${esc(String(v).split("\n")[0].slice(0, 120))}`;
+  const v = i.command || i.file_path || i.notebook_path || i.path || i.pattern || i.url || i.description || i.query || "";
+  return `<span class="name">${esc(name)}</span><span class="arg">${esc(String(v).split("\n")[0].slice(0, 160))}</span>`;
 }
 
 function render(ev) {
@@ -327,7 +358,7 @@ function render(ev) {
     }
     case "permission": {
       const el = add(`<div class="title">Claude 想要使用 ${esc(d.tool)}，需要你批准</div><pre>${esc(d.input?.command || d.input?.file_path ? (d.input.command || d.input.file_path) : JSON.stringify(d.input, null, 2))}</pre>
-        <div class="actions"><button class="primary" data-a="allow">允许</button><button data-a="always">本对话都允许 ${esc(d.tool)}</button><button class="danger" data-a="deny">拒绝</button></div>`, "msg perm" + hidden);
+        <div class="actions"><button class="btn primary" data-a="allow">允许</button><button class="btn" data-a="always">本对话都允许 ${esc(d.tool)}</button><button class="btn danger" data-a="deny">拒绝</button></div>`, "msg perm" + hidden);
       state.perms[d.request_id] = el;
       el.querySelectorAll("button").forEach((b) => (b.onclick = () => decide(d.request_id, b.dataset.a)));
       break;
@@ -379,7 +410,7 @@ function questionCard(d) {
       <input class="other" placeholder="其他（自己填写）">
     </div>`).join("");
   return `<div class="title">Claude 想问你</div>${qs}
-    <div class="actions"><button class="primary" data-a="send">提交回答</button><button data-a="skip">跳过，让 Claude 自己决定</button></div>`;
+    <div class="actions"><button class="btn primary" data-a="send">提交回答</button><button class="btn" data-a="skip">跳过，让 Claude 自己决定</button></div>`;
 }
 
 function wireQuestion(el, d) {
@@ -448,9 +479,9 @@ async function listDir(path) {
     if (path) d.entries.unshift({ name: "..", dir: true, up: true });
     for (const e of d.entries) {
       const row = document.createElement("div");
-      row.className = "frow";
+      row.className = "frow" + (e.dir ? " dir" : "");
       const p = e.up ? segs.slice(0, -1).join("/") : (path ? path + "/" : "") + e.name;
-      row.innerHTML = `<span class="fname">${e.dir ? "📁" : "📄"} ${esc(e.name)}</span><span class="muted small">${e.dir ? "" : fmtSize(e.size)}</span>`;
+      row.innerHTML = `${e.up ? ICON.up : e.dir ? ICON.folder : ICON.file}<span class="fname">${e.up ? "上一级" : esc(e.name)}</span><span class="muted small">${e.dir ? "" : fmtSize(e.size)}</span>`;
       row.onclick = () => (e.dir ? listDir(p) : openPreview(p));
       box.appendChild(row);
     }
@@ -471,7 +502,7 @@ async function openPreview(path) {
     const d = await api(`api/chats/${state.chatId}/open?path=${encodeURIComponent(path)}`);
     files.path = d.path.split("/").slice(0, -1).join("/");
     const head = `<div class="pv-head"><b>${esc(d.name)}</b><span class="muted small">${fmtSize(d.size)}</span>
-      <a class="btn" href="${esc(d.url)}?dl=1">下载</a><a class="btn" href="${esc(d.url)}" target="_blank" rel="noopener">新窗口打开</a></div>`;
+      <a class="btn" href="${esc(d.url)}" target="_blank" rel="noopener">新窗口打开</a><a class="btn primary" href="${esc(d.url)}?dl=1">下载</a></div>`;
     const ct = d.content_type || "";
     if (ct.startsWith("image/")) {
       box.innerHTML = head + `<div class="pv-img"><img src="${esc(d.url)}" alt="${esc(d.name)}"></div>`;
@@ -591,6 +622,7 @@ $("input").addEventListener("input", autosize);
   state.models = me.models || [];
   state.efforts = me.efforts || [];
   state.defaults = me.defaults || {};
+  if (window.innerWidth <= 760) $("input").placeholder = "给 Claude 发消息";
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   await loadChats();

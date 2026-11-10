@@ -3,74 +3,82 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16171a" media="(prefers-color-scheme: dark)">
 <title>网页 Agent</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232f6bff'/%3E%3Cpath d='M10 12l5 4-5 4M17 21h6' stroke='white' stroke-width='2.4' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="static/style.css">
 </head>
 <body>
 <div id="login" class="login hidden">
   <div class="login-card">
+    <div class="logo lg"><svg viewBox="0 0 24 24"><path d="M7 9l4 3-4 3M13 16h4"/></svg></div>
     <h1>网页 Agent</h1>
-    <p class="muted">在这里和家里电脑上的 Claude Code 对话。登录需要在企业微信里确认。</p>
-    <button id="loginBtn" class="primary">发送登录请求到企业微信</button>
-    <div id="loginWait" class="hidden">
-      <p>已发到你的企业微信，请在手机上打开链接确认。</p>
-      <p>验证码 <b id="loginCode" class="code"></b>（确认时核对一致）</p>
-      <p class="muted" id="loginHint">等待确认…</p>
+    <p class="muted">和家里电脑上的 Claude Code 对话</p>
+    <button id="loginBtn" class="btn primary block">发送登录请求到企业微信</button>
+    <div id="loginWait" class="login-wait hidden">
+      <p>已发到你的企业微信，请在手机上打开链接确认</p>
+      <div class="code" id="loginCode"></div>
+      <p class="muted small" id="loginHint">确认时核对验证码一致 · 等待确认…</p>
     </div>
-    <p id="loginErr" class="err"></p>
+    <p id="loginErr" class="err small"></p>
   </div>
 </div>
 
 <div id="app" class="app hidden">
   <aside id="side" class="side">
-    <div class="side-head">
-      <button id="newBtn" class="primary">＋ 新对话</button>
-      <button id="closeSide" class="icon only-mobile" title="关闭">✕</button>
+    <div class="brand">
+      <div class="logo"><svg viewBox="0 0 24 24"><path d="M7 9l4 3-4 3M13 16h4"/></svg></div>
+      <span>网页 Agent</span>
+      <button id="closeSide" class="icon-btn only-mobile" title="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
-    <div id="agentState" class="agent-state"></div>
+    <button id="newBtn" class="btn new-chat"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新对话</button>
+    <div class="side-label">对话</div>
     <ul id="chatList" class="chat-list"></ul>
-    <div class="side-foot"><button id="logoutBtn" class="link">退出登录</button></div>
+    <div class="side-foot">
+      <div id="agentState" class="agent-state"></div>
+      <button id="logoutBtn" class="link">退出</button>
+    </div>
   </aside>
+  <div id="scrim" class="scrim"></div>
 
   <main class="main">
     <header class="top">
-      <button id="openSide" class="icon only-mobile" title="对话列表">☰</button>
+      <button id="openSide" class="icon-btn only-mobile" title="对话列表"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
       <div class="top-title">
-        <div id="chatTitle">选择或新建一个对话</div>
-        <div id="chatFolder" class="muted small"></div>
+        <div id="chatTitle" class="title">网页 Agent</div>
+        <div id="chatFolder" class="sub"></div>
       </div>
       <div class="top-actions">
-        <select id="modeSel" title="权限模式" class="hidden">
-          <option value="acceptEdits">自动改文件，命令需批准</option>
-          <option value="default">每步都需批准</option>
-          <option value="plan">只做计划，不改动</option>
-          <option value="bypassPermissions">全部自动（危险）</option>
-        </select>
-        <button id="setBtn" class="hidden" title="模型和 effort（下一条消息起生效）"></button>
-        <button id="ctxBtn" class="hidden" title="上下文用量，点击压缩（/compact）"></button>
-        <button id="filesBtn" class="hidden" title="浏览、预览、下载项目里的文件">文件</button>
-        <button id="archiveBtn" class="hidden" title="从列表中移除">归档</button>
+        <button id="ctxBtn" class="pill ctx hidden" title="上下文用量，点击压缩（/compact）"></button>
+        <button id="filesBtn" class="icon-btn hidden" title="项目文件"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></button>
+        <button id="archiveBtn" class="icon-btn hidden" title="归档（从列表移除）"><svg viewBox="0 0 24 24"><path d="M4 7h16v3H4zM6 10v8a1 1 0 001 1h10a1 1 0 001-1v-8M10 14h4"/></svg></button>
       </div>
     </header>
 
-    <div id="messages" class="messages">
-      <div class="empty muted">左边选一个对话，或点「新对话」选择项目目录开始。</div>
-    </div>
-
-    <div id="statusBar" class="status-bar hidden">
-      <span class="dot"></span><span id="statusText"></span>
-      <button id="stopBtn" class="danger small-btn">停止</button>
-    </div>
+    <div id="messages" class="messages"></div>
 
     <footer id="composer" class="composer hidden">
-      <div id="queueList" class="queue-list hidden"></div>
-      <div id="attachList" class="attach-list"></div>
-      <div class="compose-row">
-        <label class="icon attach" title="添加图片或文件">📎<input id="fileInput" type="file" multiple hidden></label>
-        <textarea id="input" rows="1" placeholder="给 Claude 发消息（Enter 发送，Shift+Enter 换行，可粘贴截图）"></textarea>
-        <div class="send-col">
-          <button id="sendBtn" class="primary">发送</button>
-          <button id="interruptBtn" class="hidden small-text" title="停掉 Claude 正在做的事，马上处理这条">打断并发送</button>
+      <div id="statusBar" class="status-bar hidden">
+        <span class="dot"></span><span id="statusText"></span>
+        <button id="stopBtn" class="link danger">停止</button>
+      </div>
+      <div class="composer-card">
+        <div id="queueList" class="queue-list hidden"></div>
+        <div id="attachList" class="attach-list"></div>
+        <textarea id="input" rows="1" placeholder="给 Claude 发消息，可粘贴截图（Shift+Enter 换行）"></textarea>
+        <div class="compose-bar">
+          <label class="icon-btn" title="添加图片或文件"><svg viewBox="0 0 24 24"><path d="M20 11.5l-7.8 7.8a5 5 0 01-7.1-7.1l8.5-8.5a3.3 3.3 0 014.7 4.7l-8.5 8.5a1.7 1.7 0 01-2.4-2.4l7.8-7.8"/></svg><input id="fileInput" type="file" multiple hidden></label>
+          <select id="modeSel" class="pill hidden" title="权限模式">
+            <option value="acceptEdits">自动改文件</option>
+            <option value="default">每步都批准</option>
+            <option value="plan">只读</option>
+            <option value="bypassPermissions">全部自动（危险）</option>
+          </select>
+          <button id="setBtn" class="pill hidden" title="模型和 effort（下一条消息起生效）"></button>
+          <span class="spacer"></span>
+          <button id="interruptBtn" class="btn hidden" title="停掉 Claude 正在做的事，马上处理这条">打断并发送</button>
+          <button id="sendBtn" class="btn primary">发送</button>
         </div>
       </div>
     </footer>
@@ -85,35 +93,35 @@
       <select id="newMode">
         <option value="acceptEdits">自动改文件，命令需批准（推荐）</option>
         <option value="default">每步都需批准</option>
-        <option value="plan">只做计划，不改动</option>
+        <option value="plan">只读：只回答和做计划，不改动</option>
         <option value="bypassPermissions">全部自动（危险）</option>
       </select>
     </label>
     <div class="row2">
-      <label>模型<select id="newModel" class="model-sel"></select></label>
-      <label>Effort<select id="newEffort" class="effort-sel"></select></label>
+      <label>模型<select id="newModel"></select></label>
+      <label>Effort<select id="newEffort"></select></label>
     </div>
-    <div class="dlg-actions"><button value="cancel">取消</button><button id="createBtn" value="ok" class="primary">开始</button></div>
+    <div class="dlg-actions"><button value="cancel" class="btn">取消</button><button id="createBtn" value="ok" class="btn primary">开始</button></div>
   </form>
 </dialog>
 
 <dialog id="setDlg">
   <form method="dialog" class="dlg">
     <h3>模型和 Effort</h3>
-    <p class="muted small">下一条消息起生效。Effort 越高想得越久、越仔细，也越慢。</p>
+    <p class="muted small">下一条消息起生效。Effort 越高想得越仔细，也越慢。</p>
     <div class="row2">
-      <label>模型<select id="setModel" class="model-sel"></select></label>
-      <label>Effort<select id="setEffort" class="effort-sel"></select></label>
+      <label>模型<select id="setModel"></select></label>
+      <label>Effort<select id="setEffort"></select></label>
     </div>
-    <div class="dlg-actions"><button value="cancel">取消</button><button id="saveSetBtn" value="ok" class="primary">保存</button></div>
+    <div class="dlg-actions"><button value="cancel" class="btn">取消</button><button id="saveSetBtn" value="ok" class="btn primary">保存</button></div>
   </form>
 </dialog>
 
 <dialog id="filesDlg" class="files-dlg">
   <div class="files-head">
-    <button id="filesBack" class="hidden">← 返回</button>
+    <button id="filesBack" class="icon-btn hidden" title="返回"><svg viewBox="0 0 24 24"><path d="M15 6l-6 6 6 6"/></svg></button>
     <div id="filesPath" class="files-path"></div>
-    <button id="filesClose" class="icon" title="关闭">✕</button>
+    <button id="filesClose" class="icon-btn" title="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
   </div>
   <div id="filesList" class="files-list"></div>
   <div id="filesPreview" class="files-preview hidden"></div>
