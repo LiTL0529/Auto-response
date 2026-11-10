@@ -189,6 +189,11 @@ select.pill { padding-right: 6px; cursor: pointer; }
   overflow-x: auto; font: 13px/1.55 var(--mono); white-space: pre; margin: 8px 0;
 }
 .assistant pre code { background: none; padding: 0; }
+.assistant.streaming > :last-child::after {
+  content: ""; display: inline-block; width: 7px; height: 1.05em; margin-left: 3px; vertical-align: -2px;
+  background: var(--accent); border-radius: 1px; animation: pulse 1s infinite;
+}
+.assistant.streaming:empty::after { content: ""; display: inline-block; width: 7px; height: 1.05em; background: var(--accent); animation: pulse 1s infinite; }
 .assistant .table-wrap { overflow-x: auto; margin: 10px 0; border: 1px solid var(--line); border-radius: 10px; }
 .assistant table { border-collapse: collapse; width: 100%; font-size: 14px; }
 .assistant th, .assistant td { padding: 7px 12px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }

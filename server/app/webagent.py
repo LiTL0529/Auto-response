@@ -214,7 +214,7 @@ class WebHub:
             if etype == "rewound":
                 await self._finish_rewind(chat_id, data)
                 continue
-            if etype == "progress":  # 准备阶段的进度（如下载附件）：只推给页面，不存
+            if etype in ("progress", "delta"):  # 下载进度 / 正在生成的文字：只推给页面，不存
                 await self.publish(chat_id, {"id": 0, "type": "progress", "data": data})
                 continue
             if etype == "file":

@@ -215,6 +215,7 @@ async function openChat(id) {
   state.tools = {};
   state.perms = {};
   state.questions = {};
+  state.stream = null;
   state.lastId = 0;
   const box = $("messages");
   if (!id) {
@@ -251,6 +252,7 @@ async function openChat(id) {
       return setStatus(ev.data.status);
     }
     if (ev.type === "queue") return renderQueue(ev.data.items || []);
+    if (ev.type === "delta") return streamDelta(ev.data.text || "");
     if (ev.type === "progress") { if (state.chat?.status === "running") $("statusText").textContent = ev.data.text; return; }
     if (ev.reload) return openChat(id);
     if (ev.id && ev.id <= state.lastId) return;
@@ -339,6 +341,12 @@ function render(ev) {
   if (ev.id) state.lastId = Math.max(state.lastId, ev.id);
   const d = ev.data || {};
   const hidden = ev.hidden ? " hidden-turn" : "";
+  if (state.stream && ev.type !== "text") {
+    // 流式那段没有等到完整文字（比如只有空白）：收尾，别让后面的文字替换错地方
+    if (!state.stream.text.trim()) state.stream.el.remove();
+    else state.stream.el.classList.remove("streaming");
+    state.stream = null;
+  }
   switch (ev.type) {
     case "user": {
       const div = add(`<div class="user-text">${esc(d.text)}</div>${fileThumbs(d.files)}`, "msg user" + hidden);
@@ -356,7 +364,12 @@ function render(ev) {
       break;
     }
     case "text":
-      add(md(d.text), "msg assistant" + hidden);
+      if (state.stream) {
+        // 正在流式显示的这一段写完了：换成完整文字
+        state.stream.el.innerHTML = md(d.text);
+        state.stream.el.classList.remove("streaming");
+        state.stream = null;
+      } else add(md(d.text), "msg assistant" + hidden);
       break;
     case "tool_use": {
       const el = add(`<details><summary>${toolSummary(d.name, d.input)}</summary><div class="body"><pre>${esc(JSON.stringify(d.input, null, 2))}</pre><div class="result pending">运行中…</div></div></details>`, "msg tool" + hidden);
@@ -443,6 +456,20 @@ function render(ev) {
       add(esc(d.text), "msg note err" + hidden);
       break;
   }
+}
+
+// 流式输出：Claude 正在生成的文字（不存服务器，写完后由完整的 text 事件替换）
+function streamDelta(text) {
+  if (!state.stream) state.stream = { el: add("", "msg assistant streaming"), text: "", raf: 0 };
+  const s = state.stream;
+  s.text += text;
+  if (s.raf) return;
+  s.raf = requestAnimationFrame(() => {
+    s.raf = 0;
+    if (state.stream !== s) return;
+    s.el.innerHTML = md(s.text);
+    scrollDown();
+  });
 }
 
 // Claude 的提问（AskUserQuestion）：每个问题一组选项，可以多选的用复选，另外都能填「其他」

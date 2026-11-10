@@ -229,3 +229,11 @@ def test_browse_and_open_files(web):
     r = client.get(f"/agent/api/files/{fid}")
     assert r.headers["content-type"].startswith("text/plain") and "sandbox" in r.headers["content-security-policy"]
     assert "attachment" in client.get(f"/agent/api/files/{fid}", params={"dl": 1}).headers["content-disposition"]
+
+
+def test_text_deltas_are_relayed_not_stored(web):
+    client, fake = web
+    login(client, fake)
+    cid = client.post("/agent/api/chats", json={"folder": FOLDER}, headers=W).json()["id"]
+    _events(client, cid, {"type": "delta", "text": "正在"}, {"type": "progress", "text": "50%"}, {"type": "text", "text": "正在写"})
+    assert [e["type"] for e in client.get(f"/agent/api/chats/{cid}").json()["events"]] == ["text"]

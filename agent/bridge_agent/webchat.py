@@ -76,6 +76,45 @@ def _result_text(content: Any) -> str:
     return "\n".join(parts)
 
 
+class DeltaStreamer:
+    """把 Claude 正在生成的文字攒一小段（约 0.15 秒）发给服务器，网页上就能边生成边显示。
+
+    同一时间只有一个请求在发，所以顺序不会乱；发完整事件之前先 drain()，保证增量都在它前面送到。
+    增量只是为了显示，发送失败直接丢掉，最后的完整文字会覆盖它。
+    """
+
+    INTERVAL = 0.15
+
+    def __init__(self, api, chat_id: str):
+        self.api = api
+        self.chat_id = chat_id
+        self.buf: list[str] = []
+        self.task: asyncio.Task | None = None
+
+    def add(self, text: str) -> None:
+        if not text:
+            return
+        self.buf.append(text)
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._run())
+
+    async def _run(self) -> None:
+        while self.buf:
+            await asyncio.sleep(self.INTERVAL)
+            text, self.buf = "".join(self.buf), []
+            try:
+                await asyncio.to_thread(self.api.web_events, self.chat_id, [{"type": "delta", "text": text}], 1)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def drain(self) -> None:
+        while (self.task and not self.task.done()) or self.buf:
+            if self.task and not self.task.done():
+                await self.task
+            elif self.buf:
+                self.task = asyncio.create_task(self._run())
+
+
 @dataclass
 class Turn:
     chat_id: str
@@ -257,6 +296,7 @@ class WebChat:
             PermissionResultAllow,
             PermissionResultDeny,
             ResultMessage,
+            StreamEvent,
             SystemMessage,
             TextBlock,
             ToolResultBlock,
@@ -309,14 +349,22 @@ class WebChat:
             max_turns=self.cfg.max_turns,
             # Claude 读大 PDF / 图片时，CLI 一条消息可能超过默认的 10 MB
             max_buffer_size=128 * 1024 * 1024,
+            include_partial_messages=True,  # 逐字输出，网页上边生成边显示
         )
         session_id = ""
         result_event: dict | None = None
+        streamer = DeltaStreamer(self.api, chat_id)
         async with ClaudeSDKClient(options=options) as client:
             state.client = client
             await client.query(prompt)
             async for msg in client.receive_response():
                 events: list[dict] = []
+                if isinstance(msg, StreamEvent):
+                    ev = msg.event or {}
+                    delta = ev.get("delta") or {}
+                    if not msg.parent_tool_use_id and ev.get("type") == "content_block_delta" and delta.get("type") == "text_delta":
+                        streamer.add(delta.get("text", ""))
+                    continue
                 if isinstance(msg, SystemMessage) and msg.subtype == "init":
                     session_id = msg.data.get("session_id", session_id)
                 elif isinstance(msg, AssistantMessage) and not msg.parent_tool_use_id:
@@ -340,7 +388,9 @@ class WebChat:
                     result_event = {"type": "result", "ok": ok, "duration_ms": msg.duration_ms,
                                     "cost_usd": msg.total_cost_usd, "error": _clip(err), "usage": _usage(msg)}
                 if events:
+                    await streamer.drain()  # 增量先送到，完整文字再覆盖
                     await self.emit(chat_id, *events)
+            await streamer.drain()
             if result_event:
                 try:  # 上下文用了多少（和 /context 一样的数据）
                     ctx = await asyncio.wait_for(client.get_context_usage(), 20)
