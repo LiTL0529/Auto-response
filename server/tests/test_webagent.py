@@ -237,3 +237,24 @@ def test_text_deltas_are_relayed_not_stored(web):
     cid = client.post("/agent/api/chats", json={"folder": FOLDER}, headers=W).json()["id"]
     _events(client, cid, {"type": "delta", "text": "正在"}, {"type": "progress", "text": "50%"}, {"type": "text", "text": "正在写"})
     assert [e["type"] for e in client.get(f"/agent/api/chats/{cid}").json()["events"]] == ["text"]
+
+
+def test_hub_relays_delta_with_its_own_type(tmp_path):
+    import asyncio
+
+    from app.webagent import WebHub, WebStore
+
+    async def main():
+        async def notify(_):
+            return True
+
+        hub = WebHub(WebStore(str(tmp_path / "w.db")), files=None, notify=notify, base_url="https://x")
+        hub.folders = [{"path": FOLDER, "name": "x"}]
+        chat = hub.create_chat(FOLDER, "plan")
+        q: asyncio.Queue = asyncio.Queue()
+        hub.subscribers[chat["id"]] = {q}
+        await hub.agent_events(chat["id"], [{"type": "delta", "text": "你"}, {"type": "progress", "text": "50%"}])
+        return [q.get_nowait() for _ in range(q.qsize())]
+
+    got = asyncio.run(main())
+    assert [(r["type"], r["data"]["text"]) for r in got] == [("delta", "你"), ("progress", "50%")]
