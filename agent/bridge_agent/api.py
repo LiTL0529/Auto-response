@@ -104,11 +104,19 @@ class ServerAPI:
                 time.sleep(delay)
                 delay = min(delay * 2, 30)
 
-    def download(self, file_id: str, dest: Path) -> Path:
+    def download(self, file_id: str, dest: Path, cancel=None, progress=None) -> Path:
+        """cancel：threading.Event，置位后中止下载；progress(已下载字节, 总字节)：下载过程中定期回调。"""
         dest.parent.mkdir(parents=True, exist_ok=True)
         with self.http.stream("GET", f"/api/agent/files/{file_id}") as r:
             r.raise_for_status()
+            total = int(r.headers.get("content-length") or 0)
+            done = 0
             with open(dest, "wb") as f:
                 for chunk in r.iter_bytes():
+                    if cancel is not None and cancel.is_set():
+                        raise InterruptedError("下载已取消")
                     f.write(chunk)
+                    done += len(chunk)
+                    if progress:
+                        progress(done, total)
         return dest

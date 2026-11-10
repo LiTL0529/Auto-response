@@ -208,6 +208,7 @@ async function openChat(id) {
       return setStatus(ev.data.status);
     }
     if (ev.type === "queue") return renderQueue(ev.data.items || []);
+    if (ev.type === "progress") { if (state.chat?.status === "running") $("statusText").textContent = ev.data.text; return; }
     if (ev.reload) return openChat(id);
     if (ev.id && ev.id <= state.lastId) return;
     render(ev);
@@ -539,7 +540,12 @@ async function rewind(turn, text) {
   } catch (e) { alert(e.message); }
 }
 
-$("stopBtn").onclick = () => api(`api/chats/${state.chatId}/stop`, { method: "POST" }).catch((e) => alert(e.message));
+$("stopBtn").onclick = async () => {
+  $("stopBtn").disabled = true;
+  $("statusText").textContent = "正在停止…";
+  try { await api(`api/chats/${state.chatId}/stop`, { method: "POST" }); } catch (e) { alert(e.message); }
+  setTimeout(() => ($("stopBtn").disabled = false), 5000);
+};
 $("modeSel").onchange = () => api(`api/chats/${state.chatId}/mode`, { method: "POST", json: { mode: $("modeSel").value } }).catch((e) => alert(e.message));
 $("archiveBtn").onclick = async () => {
   if (!confirm("归档这个对话？（只是从列表移除，电脑上的文件不受影响）")) return;

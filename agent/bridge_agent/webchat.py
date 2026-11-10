@@ -82,6 +82,8 @@ class Turn:
     client: Any = None
     pending: dict[str, asyncio.Future] = field(default_factory=dict)
     stopped: bool = False
+    task: asyncio.Task | None = None
+    cancel: threading.Event = field(default_factory=threading.Event)  # 让后台线程里的下载也能停下
 
 
 class WebChat:
@@ -153,7 +155,9 @@ class WebChat:
     async def handle(self, cmd: dict) -> None:
         op, chat_id = cmd.get("op"), cmd.get("chat_id", "")
         if op == "turn":
-            asyncio.create_task(self.run_turn(cmd))
+            state = Turn(chat_id)
+            self.turns[chat_id] = state
+            state.task = asyncio.create_task(self.run_turn(cmd, state))
         elif op == "stop":
             await self.stop(chat_id)
         elif op == "permission":
@@ -189,17 +193,19 @@ class WebChat:
         return folder
 
     # ------------------------------------------------------------------ 一条消息
-    async def run_turn(self, cmd: dict) -> None:
+    async def run_turn(self, cmd: dict, state: Turn) -> None:
         chat_id, turn_no = cmd["chat_id"], int(cmd["turn"])
-        state = Turn(chat_id)
-        self.turns[chat_id] = state
         folder, snapshot = "", ""
         try:
             folder = self._check_folder(cmd["folder"])
             snapshot = await asyncio.to_thread(self.snaps.take, folder, f"chat {chat_id} turn {turn_no}")
             await self.emit(chat_id, {"type": "turn_started", "turn": turn_no, "session_before": cmd.get("resume") or "", "snapshot": snapshot})
-            prompt, attach_dir = await self._prompt(cmd)
+            prompt, attach_dir = await self._prompt(cmd, state)
             await self._run_claude(state, cmd, folder, prompt, attach_dir)
+        except (asyncio.CancelledError, InterruptedError):
+            # Claude 还没开始（拍快照、下载附件时）就点了停止
+            log.info("对话 %s 在准备阶段被停止", chat_id)
+            await self.emit(chat_id, {"type": "notice", "text": "已停止"})
         except Exception as e:  # noqa: BLE001
             log.exception("网页对话执行失败")
             await self.emit(chat_id, {"type": "error", "text": f"{type(e).__name__}: {e}"})
@@ -218,14 +224,25 @@ class WebChat:
             except Exception:  # noqa: BLE001
                 log.exception("上报对话结束失败")
 
-    async def _prompt(self, cmd: dict) -> tuple[str, Path]:
-        attach_dir = self.data_dir / "attachments" / cmd["chat_id"]
+    async def _prompt(self, cmd: dict, state: Turn) -> tuple[str, Path]:
+        chat_id = cmd["chat_id"]
+        attach_dir = self.data_dir / "attachments" / chat_id
         attach_dir.mkdir(parents=True, exist_ok=True)
         paths = []
+        loop = asyncio.get_running_loop()
         for i, f in enumerate(cmd.get("files") or [], 1):
             name = os.path.basename(f.get("name") or "file").replace(" ", "_")
             dest = attach_dir / f"{cmd['turn']}-{i}-{name}"
-            await asyncio.to_thread(self.api.download, f["file_id"], dest)
+            last = [0.0]
+
+            def progress(done: int, total: int, name=name) -> None:
+                # 大文件下载慢：每 5 秒在网页上报一次进度
+                if total > 1024 * 1024 and time.time() - last[0] > 5:
+                    last[0] = time.time()
+                    ev = {"type": "progress", "text": f"正在把附件 {name} 传到电脑：{done * 100 // total}%（{_mb(done)} / {_mb(total)}）"}
+                    asyncio.run_coroutine_threadsafe(self.emit(chat_id, ev), loop)
+
+            await asyncio.to_thread(self.api.download, f["file_id"], dest, state.cancel, progress)
             paths.append(str(dest))
         text = cmd.get("text") or ""
         if paths:
@@ -341,6 +358,7 @@ class WebChat:
         if not state:
             return
         state.stopped = True
+        state.cancel.set()
         for fut in list(state.pending.values()):
             if not fut.done():
                 fut.set_result((False, False))
@@ -349,6 +367,8 @@ class WebChat:
                 await state.client.interrupt()
             except Exception as e:  # noqa: BLE001
                 log.warning("中断 Claude 失败：%s", e)
+        elif state.task and not state.task.done():
+            state.task.cancel()  # 还在准备阶段：直接取消
 
     # ------------------------------------------------------------------ 回退 / 取文件
     async def rewind(self, cmd: dict) -> None:
@@ -466,6 +486,10 @@ class WebChat:
                     log.warning("上传图片 %s 失败：%s", rel, e)
             files.append(item)
         await self.emit(chat_id, {"type": "changes", "files": files, "total": len(changes)})
+
+
+def _mb(n: int) -> str:
+    return f"{n / 1048576:.1f} MB"
 
 
 def _usage(msg) -> dict:
