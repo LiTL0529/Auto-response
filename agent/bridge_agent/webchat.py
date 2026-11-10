@@ -307,6 +307,8 @@ class WebChat:
             effort=cmd.get("effort") or self.cfg.claude_effort or None,
             setting_sources=["user", "project", "local"],
             max_turns=self.cfg.max_turns,
+            # Claude 读大 PDF / 图片时，CLI 一条消息可能超过默认的 10 MB
+            max_buffer_size=128 * 1024 * 1024,
         )
         session_id = ""
         result_event: dict | None = None
