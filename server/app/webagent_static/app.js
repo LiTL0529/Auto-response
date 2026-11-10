@@ -657,8 +657,18 @@ async function sendMessage(interrupt = false) {
 }
 $("sendBtn").onclick = () => sendMessage(false);
 $("interruptBtn").onclick = () => sendMessage(true);
+// 中文输入法：按回车是在选词，不是发送。
+// 光看 e.isComposing 不够：Safari 和部分 Windows 拼音输入法会先结束输入法组合、再发出这个回车，
+// 或者把这个回车标成 keyCode 229。所以同时记住组合状态，并忽略组合刚结束那一瞬间的回车。
+let composing = false;
+let composeEndAt = 0;
+$("input").addEventListener("compositionstart", () => { composing = true; });
+$("input").addEventListener("compositionend", () => { composing = false; composeEndAt = Date.now(); });
 $("input").addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.innerWidth > 760) { e.preventDefault(); sendMessage(); }
+  if (e.key !== "Enter" || e.shiftKey || window.innerWidth <= 760) return;
+  if (e.isComposing || composing || e.keyCode === 229 || Date.now() - composeEndAt < 150) return;
+  e.preventDefault();
+  sendMessage();
 });
 function autosize() { const t = $("input"); t.style.height = "auto"; t.style.height = Math.min(t.scrollHeight, window.innerHeight * 0.4) + "px"; }
 $("input").addEventListener("input", autosize);
