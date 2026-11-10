@@ -104,19 +104,57 @@ class ServerAPI:
                 time.sleep(delay)
                 delay = min(delay * 2, 30)
 
+    DOWNLOAD_STALL = 30  # 这么多秒收不到数据就断开重连（跨境线路偶尔会卡住很久）
+    DOWNLOAD_ATTEMPTS = 8  # 连续这么多次没有任何进展才放弃
+
     def download(self, file_id: str, dest: Path, cancel=None, progress=None) -> Path:
-        """cancel：threading.Event，置位后中止下载；progress(已下载字节, 总字节)：下载过程中定期回调。"""
+        """断点续传下载。cancel：threading.Event，置位后中止；progress(已下载字节, 总字节)：定期回调。
+
+        连接卡住或断开时，用 Range 从已下载的位置接着下，不用从头再来。
+        """
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with self.http.stream("GET", f"/api/agent/files/{file_id}") as r:
-            r.raise_for_status()
-            total = int(r.headers.get("content-length") or 0)
-            done = 0
-            with open(dest, "wb") as f:
-                for chunk in r.iter_bytes():
-                    if cancel is not None and cancel.is_set():
-                        raise InterruptedError("下载已取消")
-                    f.write(chunk)
-                    done += len(chunk)
-                    if progress:
-                        progress(done, total)
+        url = f"/api/agent/files/{file_id}"
+        done, total, failures = 0, 0, 0
+
+        def cancelled() -> bool:
+            return cancel is not None and cancel.is_set()
+
+        with open(dest, "wb") as f:
+            while True:
+                before = done
+                try:
+                    headers = {"Range": f"bytes={done}-"} if done else {}
+                    timeout = httpx.Timeout(self.DOWNLOAD_STALL, connect=15)
+                    with self.http.stream("GET", url, headers=headers, timeout=timeout) as r:
+                        if r.status_code == 416 and total and done >= total:
+                            break
+                        r.raise_for_status()
+                        if r.status_code == 206:
+                            total = int(r.headers.get("content-range", "/0").rsplit("/", 1)[-1] or 0)
+                        else:
+                            if done:  # 服务器没按 Range 返回：只能从头再下
+                                f.seek(0)
+                                f.truncate()
+                                done = 0
+                            total = int(r.headers.get("content-length") or 0)
+                        for chunk in r.iter_bytes():
+                            if cancelled():
+                                raise InterruptedError("下载已取消")
+                            f.write(chunk)
+                            done += len(chunk)
+                            if progress:
+                                progress(done, total)
+                    if total and done < total:
+                        raise httpx.ReadError(f"连接提前结束（{done}/{total} 字节）")
+                    break
+                except httpx.TransportError as e:
+                    failures = 0 if done > before else failures + 1
+                    if failures >= self.DOWNLOAD_ATTEMPTS:
+                        raise
+                    wait = min(2 * (failures + 1), 15)
+                    log.warning("下载文件 %s 中断（已下载 %d/%d 字节），%ds 后续传：%s", file_id, done, total, wait, e)
+                    for _ in range(wait * 10):
+                        if cancelled():
+                            raise InterruptedError("下载已取消")
+                        time.sleep(0.1)
         return dest
