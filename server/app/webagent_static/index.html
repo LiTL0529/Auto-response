@@ -30,6 +30,7 @@
     <div class="brand">
       <div class="logo"><svg viewBox="0 0 24 24"><path d="M7 9l4 3-4 3M13 16h4"/></svg></div>
       <span>网页 Agent</span>
+      <button id="collapseSide" class="icon-btn only-desktop" title="收起侧栏（Ctrl+B）"><svg viewBox="0 0 24 24"><path d="M4 5h16v14H4zM9 5v14M15 10l-2 2 2 2"/></svg></button>
       <button id="closeSide" class="icon-btn only-mobile" title="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
     </div>
     <button id="newBtn" class="btn new-chat"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新对话</button>
@@ -44,7 +45,8 @@
 
   <main class="main">
     <header class="top">
-      <button id="openSide" class="icon-btn only-mobile" title="对话列表"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <button id="openSide" class="icon-btn" title="展开对话列表（Ctrl+B）"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+      <button id="newSmall" class="icon-btn" title="新对话"><svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
       <div class="top-title">
         <div id="chatTitle" class="title">网页 Agent</div>
         <div id="chatFolder" class="sub"></div>

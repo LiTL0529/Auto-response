@@ -177,7 +177,22 @@ $("createBtn").onclick = async (e) => {
     location.hash = c.id;
   } catch (err) { alert(err.message); }
 };
-$("openSide").onclick = () => $("side").classList.add("open");
+// 侧栏：电脑上可以收起（记住选择），手机上是抽屉
+const isMobile = () => window.innerWidth <= 760;
+function setCollapsed(on) {
+  $("app").classList.toggle("collapsed", on);
+  try { localStorage.setItem("wa_side_collapsed", on ? "1" : ""); } catch {}
+}
+try { if (localStorage.getItem("wa_side_collapsed")) $("app").classList.add("collapsed"); } catch {}
+$("openSide").onclick = () => (isMobile() ? $("side").classList.add("open") : setCollapsed(false));
+$("collapseSide").onclick = () => setCollapsed(true);
+$("newSmall").onclick = () => $("newBtn").click();
+document.addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "b" && !isMobile()) {
+    e.preventDefault();
+    setCollapsed(!$("app").classList.contains("collapsed"));
+  }
+});
 $("closeSide").onclick = () => $("side").classList.remove("open");
 $("scrim").onclick = () => $("side").classList.remove("open");
 
