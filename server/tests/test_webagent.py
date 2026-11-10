@@ -139,3 +139,93 @@ def test_agent_endpoints_need_token(web):
     client, _ = web
     assert client.get("/api/agent/web/next", params={"wait": 0}).status_code in (401, 403)
     assert client.post("/api/agent/web/events", json={"chat_id": "x", "events": []}).status_code in (401, 403)
+
+
+def _next(client):
+    return client.get("/api/agent/web/next", params={"wait": 0}, headers=AUTH).json()["commands"]
+
+
+def _events(client, cid, *evs):
+    assert client.post("/api/agent/web/events", json={"chat_id": cid, "events": list(evs)}, headers=AUTH).status_code == 200
+
+
+def test_model_settings_queue_and_question(web):
+    client, fake = web
+    login(client, fake)
+    client.post("/api/agent/web/hello", json={"folders": [{"path": FOLDER}], "defaults": {"model": "claude-opus-5-5", "effort": "high"}},
+                headers=AUTH)
+    me = client.get("/agent/api/me").json()
+    assert me["defaults"] == {"model": "claude-opus-5-5", "effort": "high"} and "max" in me["efforts"]
+    assert client.post("/agent/api/chats", json={"folder": FOLDER, "model": "gpt-4"}, headers=W).status_code == 400
+    cid = client.post("/agent/api/chats", json={"folder": FOLDER, "model": "claude-sonnet-5-5", "effort": "low"}, headers=W).json()["id"]
+
+    client.post(f"/agent/api/chats/{cid}/messages", json={"text": "第一条"}, headers=W)
+    cmd = _next(client)[0]
+    assert cmd["model"] == "claude-sonnet-5-5" and cmd["effort"] == "low"
+    # 中途换 effort：下一条起生效
+    assert client.post(f"/agent/api/chats/{cid}/settings", json={"model": "", "effort": "max"}, headers=W).status_code == 200
+
+    # 还在跑时发的消息排队，不发给电脑
+    r = client.post(f"/agent/api/chats/{cid}/messages", json={"text": "第二条", "queue": True}, headers=W)
+    assert r.json() == {"queued": True} and _next(client) == []
+    r = client.post(f"/agent/api/chats/{cid}/messages", json={"text": "第三条", "queue": True}, headers=W)
+    q = client.get(f"/agent/api/chats/{cid}").json()["queue"]
+    assert [x["text"] for x in q] == ["第二条", "第三条"]
+    client.post(f"/agent/api/chats/{cid}/unqueue", json={"id": q[1]["id"]}, headers=W)
+
+    # Claude 提问 → 网页回答
+    _events(client, cid, {"type": "turn_started", "turn": 1, "snapshot": "s"},
+            {"type": "question", "request_id": "q1", "questions": [{"question": "用哪种颜色？", "options": [{"label": "蓝"}]}]})
+    assert client.get(f"/agent/api/chats/{cid}").json()["chat"]["status"] == "waiting"
+    assert any("在问你" in m for m in fake.to(f"app:{OWNER}"))
+    client.post(f"/agent/api/chats/{cid}/answer", json={"request_id": "q1", "answers": {"用哪种颜色？": "蓝"}}, headers=W)
+    assert _next(client)[0] == {"op": "answer", "chat_id": cid, "request_id": "q1", "answers": {"用哪种颜色？": "蓝"}}
+
+    # 一轮结束：记下用量，自动发出排队的第二条（用新的 effort）
+    usage = {"input_tokens": 1200, "output_tokens": 80, "context_pct": 12.5}
+    _events(client, cid, {"type": "result", "ok": True, "usage": usage}, {"type": "status", "status": "idle"})
+    cmd = _next(client)[0]
+    assert cmd["op"] == "turn" and cmd["text"] == "第二条" and cmd["turn"] == 2 and cmd["effort"] == "max" and cmd["model"] == ""
+    d = client.get(f"/agent/api/chats/{cid}").json()
+    assert d["queue"] == [] and d["chat"]["status"] == "running"
+    import json as _json
+    assert _json.loads(d["chat"]["usage"])["context_pct"] == 12.5
+
+    # 打断并发送：排队 + 停止当前这一轮
+    client.post(f"/agent/api/chats/{cid}/messages", json={"text": "改主意了", "interrupt": True}, headers=W)
+    assert _next(client) == [{"op": "stop", "chat_id": cid}]
+    _events(client, cid, {"type": "status", "status": "idle"})
+    assert _next(client)[0]["text"] == "改主意了"
+
+
+def test_browse_and_open_files(web):
+    import threading
+
+    client, fake = web
+    login(client, fake)
+    cid = client.post("/agent/api/chats", json={"folder": FOLDER}, headers=W).json()["id"]
+    out = {}
+
+    def browse():
+        out["ls"] = client.get(f"/agent/api/chats/{cid}/ls", params={"path": "src"})
+
+    t = threading.Thread(target=browse)
+    t.start()
+    cmd = None
+    for _ in range(100):
+        cmds = _next(client)
+        if cmds:
+            cmd = cmds[0]
+            break
+    assert cmd and cmd["op"] == "ls" and cmd["path"] == "src" and cmd["folder"] == FOLDER
+    entries = [{"name": "a.py", "dir": False, "size": 3, "mtime": 0}]
+    client.post("/api/agent/web/reply", json={"reply_id": cmd["reply_id"], "data": {"path": "src", "entries": entries}}, headers=AUTH)
+    t.join(10)
+    assert out["ls"].json()["entries"] == entries
+
+    # 电脑上传的文件：HTML 也只按纯文本显示，并且禁止脚本
+    fid = client.post("/api/agent/files", files={"file": ("x.html", b"<script>alert(1)</script>", "application/octet-stream")},
+                      headers=AUTH).json()["file_id"]
+    r = client.get(f"/agent/api/files/{fid}")
+    assert r.headers["content-type"].startswith("text/plain") and "sandbox" in r.headers["content-security-policy"]
+    assert "attachment" in client.get(f"/agent/api/files/{fid}", params={"dl": 1}).headers["content-disposition"]

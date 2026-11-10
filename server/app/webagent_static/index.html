@@ -46,7 +46,9 @@
           <option value="plan">只做计划，不改动</option>
           <option value="bypassPermissions">全部自动（危险）</option>
         </select>
-        <button id="fetchBtn" class="hidden" title="把电脑上的文件取回来下载">取回文件</button>
+        <button id="setBtn" class="hidden" title="模型和 effort（下一条消息起生效）"></button>
+        <button id="ctxBtn" class="hidden" title="上下文用量，点击压缩（/compact）"></button>
+        <button id="filesBtn" class="hidden" title="浏览、预览、下载项目里的文件">文件</button>
         <button id="archiveBtn" class="hidden" title="从列表中移除">归档</button>
       </div>
     </header>
@@ -61,11 +63,15 @@
     </div>
 
     <footer id="composer" class="composer hidden">
+      <div id="queueList" class="queue-list hidden"></div>
       <div id="attachList" class="attach-list"></div>
       <div class="compose-row">
         <label class="icon attach" title="添加图片或文件">📎<input id="fileInput" type="file" multiple hidden></label>
         <textarea id="input" rows="1" placeholder="给 Claude 发消息（Enter 发送，Shift+Enter 换行，可粘贴截图）"></textarea>
-        <button id="sendBtn" class="primary">发送</button>
+        <div class="send-col">
+          <button id="sendBtn" class="primary">发送</button>
+          <button id="interruptBtn" class="hidden small-text" title="停掉 Claude 正在做的事，马上处理这条">打断并发送</button>
+        </div>
       </div>
     </footer>
   </main>
@@ -83,8 +89,34 @@
         <option value="bypassPermissions">全部自动（危险）</option>
       </select>
     </label>
+    <div class="row2">
+      <label>模型<select id="newModel" class="model-sel"></select></label>
+      <label>Effort<select id="newEffort" class="effort-sel"></select></label>
+    </div>
     <div class="dlg-actions"><button value="cancel">取消</button><button id="createBtn" value="ok" class="primary">开始</button></div>
   </form>
+</dialog>
+
+<dialog id="setDlg">
+  <form method="dialog" class="dlg">
+    <h3>模型和 Effort</h3>
+    <p class="muted small">下一条消息起生效。Effort 越高想得越久、越仔细，也越慢。</p>
+    <div class="row2">
+      <label>模型<select id="setModel" class="model-sel"></select></label>
+      <label>Effort<select id="setEffort" class="effort-sel"></select></label>
+    </div>
+    <div class="dlg-actions"><button value="cancel">取消</button><button id="saveSetBtn" value="ok" class="primary">保存</button></div>
+  </form>
+</dialog>
+
+<dialog id="filesDlg" class="files-dlg">
+  <div class="files-head">
+    <button id="filesBack" class="hidden">← 返回</button>
+    <div id="filesPath" class="files-path"></div>
+    <button id="filesClose" class="icon" title="关闭">✕</button>
+  </div>
+  <div id="filesList" class="files-list"></div>
+  <div id="filesPreview" class="files-preview hidden"></div>
 </dialog>
 
 <script src="static/app.js"></script>

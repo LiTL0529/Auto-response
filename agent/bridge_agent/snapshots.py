@@ -110,6 +110,16 @@ class Snapshots:
         self._check(self._git(folder, "commit", "-q", "--allow-empty", "--no-verify", "-m", message), "保存快照")
         return self._check(self._git(folder, "rev-parse", "HEAD"), "读取快照")
 
+    def diff(self, folder: str, a: str, b: str) -> list[tuple[str, str]]:
+        """两个快照之间变了哪些文件：[(A/M/D, 相对路径)]。"""
+        out = self._check(self._git(folder, "diff", "--name-status", "--no-renames", a, b), "比较文件")
+        changes = []
+        for line in out.splitlines():
+            status, _, path = line.partition("\t")
+            if path:
+                changes.append((status[:1], path))
+        return changes
+
     def restore(self, folder: str, snapshot: str) -> tuple[list[str], str]:
         """把目录恢复成快照时的样子（包括删除之后新建的文件）。返回（变动的文件，恢复前的安全快照）。"""
         self._ensure(folder)

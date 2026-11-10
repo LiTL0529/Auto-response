@@ -72,3 +72,18 @@ def test_project_git_untouched(tmp_path):
     assert log.stdout == ""  # 项目自己的仓库没有任何提交
     status = subprocess.run(["git", "status", "--porcelain"], cwd=proj, capture_output=True, text=True).stdout
     assert "a.txt" in status  # 只是普通的未跟踪文件
+
+
+def test_diff_lists_changes_between_snapshots(tmp_path):
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / "a.txt").write_text("1", encoding="utf-8")
+    (proj / "old.txt").write_text("x", encoding="utf-8")
+    snaps = Snapshots(tmp_path / "shadow")
+    s1 = snaps.take(str(proj))
+    (proj / "a.txt").write_text("2", encoding="utf-8")
+    (proj / "old.txt").unlink()
+    (proj / "图").mkdir()
+    (proj / "图" / "out.png").write_bytes(b"\x89PNG")
+    s2 = snaps.take(str(proj))
+    assert sorted(snaps.diff(str(proj), s1, s2)) == [("A", "图/out.png"), ("D", "old.txt"), ("M", "a.txt")]

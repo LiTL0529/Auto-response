@@ -79,8 +79,11 @@ class ServerAPI:
         raise RuntimeError("unreachable")
 
     # ------------------------------------------------ 网页 Agent
-    def web_hello(self, folders: list[dict], startup: bool) -> None:
-        self._post("/api/agent/web/hello", json={"folders": folders, "startup": startup})
+    def web_hello(self, folders: list[dict], startup: bool, defaults: dict | None = None) -> None:
+        self._post("/api/agent/web/hello", json={"folders": folders, "startup": startup, "defaults": defaults or {}})
+
+    def web_reply(self, reply_id: str, data: dict) -> None:
+        self._post("/api/agent/web/reply", json={"reply_id": reply_id, "data": data})
 
     def web_next(self, wait: int = 25) -> list[dict]:
         r = self.http.get("/api/agent/web/next", params={"wait": wait})

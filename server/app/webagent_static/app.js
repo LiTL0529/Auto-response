@@ -1,7 +1,23 @@
 "use strict";
 // 网页 Agent 前端：登录（企业微信确认）、对话列表、实时消息（SSE）、附件、审批、回退。
 const $ = (id) => document.getElementById(id);
-const state = { chatId: null, chat: null, lastId: 0, es: null, listEs: null, folders: [], pending: [], rewindable: new Set(), tools: {}, perms: {} };
+const state = {
+  chatId: null, chat: null, lastId: 0, es: null, listEs: null, folders: [], pending: [], rewindable: new Set(), tools: {}, perms: {},
+  questions: {}, models: [], efforts: [], defaults: {}, queue: [],
+};
+const BUSY = ["running", "waiting"];
+const EFFORT_NAMES = { low: "low（快）", medium: "medium", high: "high", xhigh: "xhigh", max: "max（最仔细）" };
+
+function modelName(id) { return (state.models.find((m) => m.id === id) || {}).name || id || ""; }
+function fillSettings(modelSel, effortSel, model, effort) {
+  const dm = modelName(state.defaults.model) || "电脑上的设置";
+  modelSel.innerHTML = `<option value="">默认（${esc(dm)}）</option>` + state.models.map((m) => `<option value="${esc(m.id)}">${esc(m.name)}</option>`).join("");
+  effortSel.innerHTML = `<option value="">默认（${esc(state.defaults.effort || "电脑上的设置")}）</option>` + state.efforts.map((e) => `<option value="${esc(e)}">${esc(EFFORT_NAMES[e] || e)}</option>`).join("");
+  modelSel.value = model || "";
+  effortSel.value = effort || "";
+}
+function fmtTokens(n) { n = +n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1000 ? (n / 1000).toFixed(1) + "k" : String(n); }
+function fmtSize(n) { n = +n || 0; return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B"; }
 
 async function api(path, opts = {}) {
   const init = { credentials: "same-origin", ...opts, headers: { ...(opts.headers || {}) } };
@@ -103,6 +119,7 @@ $("newBtn").onclick = () => {
   const sel = $("folderSel");
   sel.innerHTML = state.folders.map((f) => `<option value="${esc(f.path)}">${esc(f.name)}（${esc(f.path)}）</option>`).join("");
   if (!state.folders.length) sel.innerHTML = "<option value=''>家里电脑还没上报可用目录</option>";
+  fillSettings($("newModel"), $("newEffort"), "", "");
   $("newDlg").showModal();
 };
 $("createBtn").onclick = async (e) => {
@@ -110,7 +127,7 @@ $("createBtn").onclick = async (e) => {
   const folder = $("folderSel").value;
   if (!folder) return;
   try {
-    const c = await api("api/chats", { method: "POST", json: { folder, mode: $("newMode").value } });
+    const c = await api("api/chats", { method: "POST", json: { folder, mode: $("newMode").value, model: $("newModel").value, effort: $("newEffort").value } });
     $("newDlg").close();
     location.hash = c.id;
   } catch (err) { alert(err.message); }
@@ -124,11 +141,12 @@ async function openChat(id) {
   state.chatId = id;
   state.tools = {};
   state.perms = {};
+  state.questions = {};
   state.lastId = 0;
   const box = $("messages");
   if (!id) {
     box.innerHTML = '<div class="empty muted">左边选一个对话，或点「新对话」选择项目目录开始。</div>';
-    for (const el of ["composer", "modeSel", "fetchBtn", "archiveBtn", "statusBar"]) $(el).classList.add("hidden");
+    for (const el of ["composer", "modeSel", "setBtn", "ctxBtn", "filesBtn", "archiveBtn", "statusBar"]) $(el).classList.add("hidden");
     $("chatTitle").textContent = "选择或新建一个对话";
     $("chatFolder").textContent = "";
     return;
@@ -140,7 +158,10 @@ async function openChat(id) {
   $("chatTitle").textContent = d.chat.title;
   $("chatFolder").textContent = d.chat.folder;
   $("modeSel").value = d.chat.mode;
-  for (const el of ["composer", "modeSel", "fetchBtn", "archiveBtn"]) $(el).classList.remove("hidden");
+  for (const el of ["composer", "modeSel", "setBtn", "filesBtn", "archiveBtn"]) $(el).classList.remove("hidden");
+  showSettings();
+  showUsage(d.chat.usage ? JSON.parse(d.chat.usage) : null);
+  renderQueue(d.queue || []);
   box.innerHTML = "";
   for (const ev of d.events) render(ev);
   setStatus(d.chat.status);
@@ -156,6 +177,7 @@ async function openChat(id) {
       if (ev.data.status === "idle" && was && was !== "idle") return openChat(id);
       return setStatus(ev.data.status);
     }
+    if (ev.type === "queue") return renderQueue(ev.data.items || []);
     if (ev.reload) return openChat(id);
     if (ev.id && ev.id <= state.lastId) return;
     render(ev);
@@ -176,10 +198,44 @@ function setStatus(status) {
   const busy = status === "running" || status === "waiting" || status === "rewinding";
   bar.classList.toggle("hidden", !busy);
   bar.classList.toggle("waiting", status === "waiting");
-  $("statusText").textContent = { running: "Claude 正在工作…", waiting: "等你批准", rewinding: "正在回退文件…" }[status] || "";
+  $("statusText").textContent = { running: "Claude 正在工作…（现在发的消息会排队，做完这一轮自动发出）", waiting: "等你批准或回答", rewinding: "正在回退文件…" }[status] || "";
   $("stopBtn").classList.toggle("hidden", status === "rewinding");
-  $("sendBtn").disabled = busy;
+  const working = BUSY.includes(status);
+  $("sendBtn").disabled = status === "rewinding";
+  $("sendBtn").textContent = working ? "排队" : "发送";
+  $("sendBtn").title = working ? "这一轮做完后自动发出" : "";
+  $("interruptBtn").classList.toggle("hidden", !working);
+  $("ctxBtn").disabled = busy;
   document.querySelectorAll(".rewind-btn").forEach((b) => (b.disabled = busy));
+}
+
+function showSettings() {
+  const c = state.chat || {};
+  const m = modelName(c.model || state.defaults.model) || "默认模型";
+  $("setBtn").textContent = `${m} · ${c.effort || state.defaults.effort || "默认"}`;
+}
+
+function showUsage(u) {
+  const b = $("ctxBtn");
+  if (!u || u.context_pct == null) { b.classList.add("hidden"); return; }
+  b.classList.remove("hidden");
+  b.textContent = `上下文 ${Math.round(u.context_pct)}%`;
+  b.className = u.context_pct >= 80 ? "warn" : "";
+  b.title = `已用 ${fmtTokens(u.context_tokens)} / ${fmtTokens(u.context_max)} tokens。点击压缩（/compact）：把之前的对话总结成摘要，腾出空间`;
+}
+
+function renderQueue(items) {
+  state.queue = items;
+  const box = $("queueList");
+  box.classList.toggle("hidden", !items.length);
+  box.innerHTML = items.length ? '<div class="small muted">排队中，这一轮做完后按顺序自动发出：</div>' : "";
+  for (const it of items) {
+    const row = document.createElement("div");
+    row.className = "queued";
+    row.innerHTML = `<span class="qtext">${esc(it.text || "")}${it.files?.length ? ` <span class="muted">（${it.files.length} 个附件）</span>` : ""}</span><button title="取消这条">✕</button>`;
+    row.querySelector("button").onclick = () => api(`api/chats/${state.chatId}/unqueue`, { method: "POST", json: { id: it.id } }).catch((e) => alert(e.message));
+    box.appendChild(row);
+  }
 }
 
 // ------------------------------------------------------------------ 渲染事件
@@ -229,9 +285,36 @@ function render(ev) {
       break;
     case "tool_use": {
       const el = add(`<details><summary>${toolSummary(d.name, d.input)}</summary><div class="body"><pre>${esc(JSON.stringify(d.input, null, 2))}</pre><div class="result pending">运行中…</div></div></details>`, "msg tool" + hidden);
+      const fp = d.input?.file_path || d.input?.notebook_path;
+      if (fp && ["Write", "Edit", "MultiEdit", "NotebookEdit", "Read"].includes(d.name)) {
+        const b = document.createElement("button");
+        b.className = "view-btn";
+        b.textContent = "查看文件";
+        b.onclick = (e) => { e.preventDefault(); openPreview(fp); };
+        el.querySelector("summary").appendChild(b);
+      }
       state.tools[d.id] = el;
       break;
     }
+    case "question": {
+      const el = add(questionCard(d), "msg question" + hidden);
+      state.questions[d.request_id] = el;
+      wireQuestion(el, d);
+      break;
+    }
+    case "question_done": {
+      const el = state.questions[d.request_id];
+      if (el) {
+        el.classList.add("done");
+        const a = Object.entries(d.answers || {});
+        el.querySelector(".actions").innerHTML = `<span class="muted small">${a.length ? "已回答：" + esc(a.map(([, v]) => v).join("；")) : "已跳过，让 Claude 自己决定"}</span>`;
+        el.querySelectorAll("button, input").forEach((b) => (b.disabled = true));
+      }
+      break;
+    }
+    case "changes":
+      add(changesCard(d), "msg changes" + hidden).querySelectorAll("[data-path]").forEach((a) => (a.onclick = (e) => { e.preventDefault(); openPreview(a.dataset.path); }));
+      break;
     case "tool_result": {
       const el = state.tools[d.tool_use_id];
       const html = `<pre>${esc(String(d.content ?? "").slice(0, 20000))}</pre>`;
@@ -260,6 +343,13 @@ function render(ev) {
     case "result": {
       const parts = [d.ok ? "完成" : "未完成"];
       if (d.duration_ms) parts.push(`用时 ${Math.round(d.duration_ms / 1000)} 秒`);
+      const u = d.usage;
+      if (u) {
+        parts.push(`输入 ${fmtTokens(u.input_tokens)} / 输出 ${fmtTokens(u.output_tokens)} tokens`);
+        if (u.context_pct != null) parts.push(`上下文 ${Math.round(u.context_pct)}%`);
+        if (u.model) parts.push(modelName(u.model));
+        if (!ev.hidden) showUsage(u);
+      }
       if (d.error) parts.push(d.error);
       add(esc(parts.join(" · ")), "msg note" + (d.ok ? "" : " err") + hidden);
       break;
@@ -279,6 +369,129 @@ function render(ev) {
       break;
   }
 }
+
+// Claude 的提问（AskUserQuestion）：每个问题一组选项，可以多选的用复选，另外都能填「其他」
+function questionCard(d) {
+  const qs = (d.questions || []).map((q, i) => `
+    <div class="q" data-i="${i}">
+      ${q.header ? `<span class="qh">${esc(q.header)}</span>` : ""}<div class="qt">${esc(q.question)}${q.multiSelect ? ' <span class="muted small">（可多选）</span>' : ""}</div>
+      <div class="opts">${(q.options || []).map((o) => `<button type="button" class="opt" data-label="${esc(o.label)}"><b>${esc(o.label)}</b>${o.description ? `<span class="muted small">${esc(o.description)}</span>` : ""}</button>`).join("")}</div>
+      <input class="other" placeholder="其他（自己填写）">
+    </div>`).join("");
+  return `<div class="title">Claude 想问你</div>${qs}
+    <div class="actions"><button class="primary" data-a="send">提交回答</button><button data-a="skip">跳过，让 Claude 自己决定</button></div>`;
+}
+
+function wireQuestion(el, d) {
+  el.querySelectorAll(".q").forEach((qel) => {
+    const q = d.questions[+qel.dataset.i];
+    qel.querySelectorAll(".opt").forEach((b) => (b.onclick = () => {
+      if (!q.multiSelect) qel.querySelectorAll(".opt").forEach((x) => x !== b && x.classList.remove("on"));
+      b.classList.toggle("on");
+    }));
+  });
+  el.querySelector('[data-a="send"]').onclick = () => {
+    const answers = {};
+    let missing = false;
+    el.querySelectorAll(".q").forEach((qel) => {
+      const q = d.questions[+qel.dataset.i];
+      const picked = [...qel.querySelectorAll(".opt.on")].map((b) => b.dataset.label);
+      const other = qel.querySelector(".other").value.trim();
+      if (other) picked.push(other);
+      if (picked.length) answers[q.question] = picked.join(", ");
+      else missing = true;
+    });
+    if (missing && !confirm("有的问题还没选，没选的让 Claude 自己决定？")) return;
+    answer(d.request_id, answers);
+  };
+  el.querySelector('[data-a="skip"]').onclick = () => answer(d.request_id, {});
+}
+
+async function answer(requestId, answers) {
+  try { await api(`api/chats/${state.chatId}/answer`, { method: "POST", json: { request_id: requestId, answers } }); } catch (e) { alert(e.message); }
+}
+
+// 一轮结束后，这一轮改动的文件；改过的图片直接显示
+function changesCard(d) {
+  const label = { A: "新建", M: "修改", D: "删除" };
+  const imgs = (d.files || []).filter((f) => f.file_id);
+  const list = (d.files || []).map((f) => `<li><span class="st st-${esc(f.status)}">${label[f.status] || esc(f.status)}</span>${f.status === "D"
+    ? `<span class="muted">${esc(f.path)}</span>` : `<a href="#" data-path="${esc(f.path)}">${esc(f.path)}</a>`}</li>`).join("");
+  const more = d.total > (d.files || []).length ? `<li class="muted">…还有 ${d.total - d.files.length} 个</li>` : "";
+  return `<details${(d.files || []).length <= 8 ? " open" : ""}><summary>这一轮改动了 ${esc(d.total)} 个文件</summary><ul class="changed">${list}${more}</ul></details>`
+    + (imgs.length ? `<div class="thumbs big">${imgs.map((f) => `<a href="#" data-path="${esc(f.path)}" title="${esc(f.path)}"><img src="api/files/${esc(f.file_id)}" alt="${esc(f.path)}"></a>`).join("")}</div>` : "");
+}
+
+// ------------------------------------------------------------------ 文件浏览 / 预览
+const TEXT_EXT = /\.(txt|md|markdown|log|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|env|xml|html?|css|scss|less|js|mjs|cjs|jsx|ts|tsx|vue|svelte|py|go|rs|java|kt|kts|swift|c|h|cc|cpp|hpp|cs|rb|php|sh|bash|zsh|ps1|psm1|bat|cmd|sql|gradle|properties|lock|gitignore|dockerfile|makefile|r|lua|dart|proto)$/i;
+const files = { path: "" };
+
+function openFiles(path = "") {
+  $("filesDlg").showModal();
+  return listDir(path);
+}
+
+async function listDir(path) {
+  files.path = path;
+  $("filesPreview").classList.add("hidden");
+  $("filesList").classList.remove("hidden");
+  $("filesBack").classList.add("hidden");
+  const root = (state.folders.find((f) => f.path === state.chat?.folder) || {}).name || "项目";
+  const segs = path ? path.split("/") : [];
+  $("filesPath").innerHTML = [`<a href="#" data-p="">${esc(root)}</a>`, ...segs.map((s, i) => `<a href="#" data-p="${esc(segs.slice(0, i + 1).join("/"))}">${esc(s)}</a>`)].join(" / ");
+  $("filesPath").querySelectorAll("a").forEach((a) => (a.onclick = (e) => { e.preventDefault(); listDir(a.dataset.p); }));
+  const box = $("filesList");
+  box.innerHTML = '<div class="muted pad">读取中…</div>';
+  try {
+    const d = await api(`api/chats/${state.chatId}/ls?path=${encodeURIComponent(path)}`);
+    box.innerHTML = "";
+    if (path) d.entries.unshift({ name: "..", dir: true, up: true });
+    for (const e of d.entries) {
+      const row = document.createElement("div");
+      row.className = "frow";
+      const p = e.up ? segs.slice(0, -1).join("/") : (path ? path + "/" : "") + e.name;
+      row.innerHTML = `<span class="fname">${e.dir ? "📁" : "📄"} ${esc(e.name)}</span><span class="muted small">${e.dir ? "" : fmtSize(e.size)}</span>`;
+      row.onclick = () => (e.dir ? listDir(p) : openPreview(p));
+      box.appendChild(row);
+    }
+    if (!d.entries.length) box.innerHTML = '<div class="muted pad">空目录</div>';
+    if (d.truncated) box.insertAdjacentHTML("beforeend", '<div class="muted pad small">文件太多，只显示了前 1000 个</div>');
+  } catch (e) { box.innerHTML = `<div class="err pad">${esc(e.message)}</div>`; }
+}
+
+async function openPreview(path) {
+  if (!$("filesDlg").open) $("filesDlg").showModal();
+  $("filesList").classList.add("hidden");
+  $("filesBack").classList.remove("hidden");
+  const box = $("filesPreview");
+  box.classList.remove("hidden");
+  $("filesPath").textContent = path;
+  box.innerHTML = '<div class="muted pad">正在从电脑取文件…</div>';
+  try {
+    const d = await api(`api/chats/${state.chatId}/open?path=${encodeURIComponent(path)}`);
+    files.path = d.path.split("/").slice(0, -1).join("/");
+    const head = `<div class="pv-head"><b>${esc(d.name)}</b><span class="muted small">${fmtSize(d.size)}</span>
+      <a class="btn" href="${esc(d.url)}?dl=1">下载</a><a class="btn" href="${esc(d.url)}" target="_blank" rel="noopener">新窗口打开</a></div>`;
+    const ct = d.content_type || "";
+    if (ct.startsWith("image/")) {
+      box.innerHTML = head + `<div class="pv-img"><img src="${esc(d.url)}" alt="${esc(d.name)}"></div>`;
+    } else if (ct.startsWith("text/") || TEXT_EXT.test(d.name) || d.size < 512 * 1024) {
+      const r = await fetch(d.url, { credentials: "same-origin" });
+      const buf = new Uint8Array(await r.arrayBuffer());
+      if (buf.slice(0, 8000).includes(0)) box.innerHTML = head + '<div class="muted pad">二进制文件，无法预览，请下载。</div>';
+      else {
+        const limit = 400 * 1024;
+        const text = new TextDecoder("utf-8").decode(buf.slice(0, limit));
+        box.innerHTML = head + `<pre class="pv-text">${esc(text)}${buf.length > limit ? "\n\n…（文件较大，只显示前 400 KB，完整内容请下载）" : ""}</pre>`;
+      }
+    } else if (ct === "application/pdf") {
+      box.innerHTML = head + '<div class="muted pad">PDF 请点「新窗口打开」查看。</div>';
+    } else box.innerHTML = head + '<div class="muted pad">这种文件不能在网页上预览，请下载。</div>';
+  } catch (e) { box.innerHTML = `<div class="err pad">${esc(e.message)}</div>`; }
+}
+$("filesBack").onclick = () => listDir(files.path || "");
+$("filesClose").onclick = () => $("filesDlg").close();
+$("filesBtn").onclick = () => openFiles("");
 
 // ------------------------------------------------------------------ 操作
 async function decide(requestId, action) {
@@ -302,9 +515,23 @@ $("archiveBtn").onclick = async () => {
   await api(`api/chats/${state.chatId}/archive`, { method: "POST" });
   location.hash = "";
 };
-$("fetchBtn").onclick = async () => {
-  const path = prompt("要取回的文件路径（相对项目目录，或绝对路径）：");
-  if (path) api(`api/chats/${state.chatId}/fetch`, { method: "POST", json: { path } }).catch((e) => alert(e.message));
+$("setBtn").onclick = () => {
+  fillSettings($("setModel"), $("setEffort"), state.chat?.model, state.chat?.effort);
+  $("setDlg").showModal();
+};
+$("saveSetBtn").onclick = async (e) => {
+  e.preventDefault();
+  const body = { model: $("setModel").value, effort: $("setEffort").value };
+  try {
+    await api(`api/chats/${state.chatId}/settings`, { method: "POST", json: body });
+    Object.assign(state.chat, body);
+    showSettings();
+    $("setDlg").close();
+  } catch (err) { alert(err.message); }
+};
+$("ctxBtn").onclick = async () => {
+  if (!confirm("压缩上下文？\nClaude 会把之前的对话总结成一份摘要，腾出上下文空间（细节可能会丢一些）。")) return;
+  try { await api(`api/chats/${state.chatId}/messages`, { method: "POST", json: { text: "/compact", files: [] } }); } catch (e) { alert(e.message); }
 };
 
 // 附件：选择 / 粘贴 / 拖拽
@@ -332,19 +559,24 @@ $("input").addEventListener("paste", (e) => {
 $("messages").addEventListener("dragover", (e) => e.preventDefault());
 $("messages").addEventListener("drop", (e) => { e.preventDefault(); if (state.chatId) uploadFiles([...e.dataTransfer.files]); });
 
-async function sendMessage() {
+async function sendMessage(interrupt = false) {
   const text = $("input").value;
   if (!text.trim() && !state.pending.length) return;
+  const working = BUSY.includes(state.chat?.status);
   $("sendBtn").disabled = true;
   try {
-    await api(`api/chats/${state.chatId}/messages`, { method: "POST", json: { text, files: state.pending.map((p) => p.file_id) } });
+    await api(`api/chats/${state.chatId}/messages`, {
+      method: "POST", json: { text, files: state.pending.map((p) => p.file_id), queue: working, interrupt: working && interrupt },
+    });
     $("input").value = "";
     state.pending = [];
     $("attachList").innerHTML = "";
     autosize();
-  } catch (e) { alert(e.message); $("sendBtn").disabled = false; }
+  } catch (e) { alert(e.message); }
+  $("sendBtn").disabled = state.chat?.status === "rewinding";
 }
-$("sendBtn").onclick = sendMessage;
+$("sendBtn").onclick = () => sendMessage(false);
+$("interruptBtn").onclick = () => sendMessage(true);
 $("input").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing && window.innerWidth > 760) { e.preventDefault(); sendMessage(); }
 });
@@ -356,6 +588,9 @@ $("input").addEventListener("input", autosize);
   let me;
   try { me = await api("api/me"); } catch { return; }
   state.folders = me.folders;
+  state.models = me.models || [];
+  state.efforts = me.efforts || [];
+  state.defaults = me.defaults || {};
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
   await loadChats();

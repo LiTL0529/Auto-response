@@ -26,7 +26,12 @@ from .snapshots import Snapshots
 log = logging.getLogger(__name__)
 
 MAX_FIELD = 4000  # 发到网页的单个字段最多这么长
-DISALLOWED = ["AskUserQuestion"]  # 网页上没法回答选择题，让 Claude 直接在回复里问
+QUESTION_TOOL = "AskUserQuestion"  # Claude 向用户提问：在网页上显示成选择卡片
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg"}
+MAX_AUTO_IMAGES = 12  # 一轮最多自动传这么多张改动过的图片到网页
+MAX_AUTO_IMAGE_SIZE = 10 * 1024 * 1024
+MAX_OPEN_SIZE = 200 * 1024 * 1024
+MAX_LS = 1000
 
 
 def resolve_cli(claude_path: str) -> str | None:
@@ -90,6 +95,11 @@ class WebChat:
         self.always: dict[str, set[str]] = {}
         self.cli_path = resolve_cli(cfg.claude_path)
         self.loop: asyncio.AbstractEventLoop | None = None
+        self.uploaded: dict[tuple[str, float, int], str] = {}  # (路径, 修改时间, 大小) → 已上传的 file_id
+        self.defaults = {"model": cfg.claude_model or "", "effort": cfg.claude_effort or ""}
+
+    def _hello(self, startup: bool) -> None:
+        self.api.web_hello(list(self.folders.values()), startup, self.defaults)
 
     # ------------------------------------------------------------------ 主循环
     def start(self) -> threading.Thread:
@@ -113,7 +123,7 @@ class WebChat:
         delay = 2
         while True:
             try:
-                await asyncio.to_thread(self.api.web_hello, list(self.folders.values()), True)
+                await asyncio.to_thread(self._hello, True)
                 break
             except Exception as e:  # noqa: BLE001
                 log.warning("网页 Agent 连接服务器失败，%ds 后重试：%s", delay, e)
@@ -125,7 +135,7 @@ class WebChat:
         while True:
             try:
                 if time.time() - last_hello > 60:
-                    await asyncio.to_thread(self.api.web_hello, list(self.folders.values()), False)
+                    await asyncio.to_thread(self._hello, False)
                     last_hello = time.time()
                 cmds = await asyncio.to_thread(self.api.web_next, 25)
                 delay = 2
@@ -151,6 +161,13 @@ class WebChat:
             fut = turn.pending.pop(cmd["request_id"], None) if turn else None
             if fut and not fut.done():
                 fut.set_result((bool(cmd.get("allow")), bool(cmd.get("always"))))
+        elif op == "answer":
+            turn = self.turns.get(chat_id)
+            fut = turn.pending.pop(cmd["request_id"], None) if turn else None
+            if fut and not fut.done():
+                fut.set_result(dict(cmd.get("answers") or {}))
+        elif op in ("ls", "open"):
+            asyncio.create_task(self.reply(cmd))
         elif op == "mode":
             turn = self.turns.get(chat_id)
             if turn and turn.client:
@@ -176,6 +193,7 @@ class WebChat:
         chat_id, turn_no = cmd["chat_id"], int(cmd["turn"])
         state = Turn(chat_id)
         self.turns[chat_id] = state
+        folder, snapshot = "", ""
         try:
             folder = self._check_folder(cmd["folder"])
             snapshot = await asyncio.to_thread(self.snaps.take, folder, f"chat {chat_id} turn {turn_no}")
@@ -189,6 +207,11 @@ class WebChat:
             for fut in state.pending.values():
                 if not fut.done():
                     fut.set_result((False, False))
+            if snapshot:
+                try:
+                    await self._report_changes(chat_id, folder, snapshot, turn_no)
+                except Exception:  # noqa: BLE001
+                    log.exception("统计本轮改动的文件失败")
             self.turns.pop(chat_id, None)
             try:
                 await self.emit(chat_id, {"type": "status", "status": "idle"})
@@ -227,7 +250,20 @@ class WebChat:
         chat_id = state.chat_id
         always = self.always.setdefault(chat_id, set())
 
+        async def ask_user(tool_input: dict) -> Any:
+            rid = uuid.uuid4().hex[:12]
+            fut = asyncio.get_running_loop().create_future()
+            state.pending[rid] = fut
+            await self.emit(chat_id, {"type": "question", "request_id": rid, "questions": _clip(tool_input.get("questions") or [])})
+            answers = await fut
+            if isinstance(answers, dict) and answers:
+                return PermissionResultAllow(updated_input={**tool_input, "answers": answers})
+            return PermissionResultDeny(message="用户没有回答这个问题，请按你认为最合理的方式继续，并在最后说明你的选择",
+                                        interrupt=state.stopped)
+
         async def can_use_tool(tool: str, tool_input: dict, ctx) -> Any:
+            if tool == QUESTION_TOOL:
+                return await ask_user(tool_input)
             if tool in always:
                 return PermissionResultAllow()
             rid = uuid.uuid4().hex[:12]
@@ -249,14 +285,14 @@ class WebChat:
             resume=resume,
             fork_session=bool(resume),
             can_use_tool=can_use_tool,
-            disallowed_tools=DISALLOWED,
             add_dirs=[str(attach_dir)],
-            model=self.cfg.claude_model or None,
-            effort=self.cfg.claude_effort or None,
+            model=cmd.get("model") or self.cfg.claude_model or None,
+            effort=cmd.get("effort") or self.cfg.claude_effort or None,
             setting_sources=["user", "project", "local"],
             max_turns=self.cfg.max_turns,
         )
         session_id = ""
+        result_event: dict | None = None
         async with ClaudeSDKClient(options=options) as client:
             state.client = client
             await client.query(prompt)
@@ -282,10 +318,20 @@ class WebChat:
                     ok = not msg.is_error and not state.stopped
                     err = "" if ok else ("已停止" if state.stopped else (msg.result or msg.subtype))
                     events.append({"type": "session", "session_id": session_id})
-                    events.append({"type": "result", "ok": ok, "duration_ms": msg.duration_ms,
-                                   "cost_usd": msg.total_cost_usd, "error": _clip(err)})
+                    result_event = {"type": "result", "ok": ok, "duration_ms": msg.duration_ms,
+                                    "cost_usd": msg.total_cost_usd, "error": _clip(err), "usage": _usage(msg)}
                 if events:
                     await self.emit(chat_id, *events)
+            if result_event:
+                try:  # 上下文用了多少（和 /context 一样的数据）
+                    ctx = await asyncio.wait_for(client.get_context_usage(), 20)
+                    result_event["usage"].update({
+                        "context_tokens": ctx.get("totalTokens"), "context_max": ctx.get("maxTokens"),
+                        "context_pct": round(float(ctx.get("percentage") or 0), 1), "model": ctx.get("model"),
+                    })
+                except Exception as e:  # noqa: BLE001
+                    log.info("读取上下文用量失败：%s", e)
+                await self.emit(chat_id, result_event)
             state.client = None
         if session_id:
             await self.emit(chat_id, {"type": "session", "session_id": session_id})
@@ -320,21 +366,110 @@ class WebChat:
             log.exception("回退失败")
             await self.emit(chat_id, {"type": "rewound", "turn": turn, "ok": False, "error": str(e)})
 
+    def _resolve(self, folder_s: str, raw_path: str) -> tuple[Path, Path]:
+        """把网页给的路径（相对项目目录或绝对路径）解析成项目目录里的真实路径。"""
+        folder = Path(self._check_folder(folder_s)).resolve()
+        raw = Path((raw_path or "").strip().strip('"'))
+        path = (raw if raw.is_absolute() else folder / raw).resolve()
+        if path != folder and folder not in path.parents:
+            raise PermissionError("只能访问项目目录里的文件")
+        return folder, path
+
+    async def _upload(self, path: Path) -> str:
+        st = path.stat()
+        key = (str(path), st.st_mtime, st.st_size)
+        if key not in self.uploaded:
+            self.uploaded[key] = await asyncio.to_thread(self.api.upload, path)
+        return self.uploaded[key]
+
     async def fetch(self, cmd: dict) -> None:
         chat_id = cmd["chat_id"]
         try:
-            folder = Path(self._check_folder(cmd["folder"])).resolve()
-            raw = Path(cmd.get("path", "").strip().strip('"'))
-            path = (raw if raw.is_absolute() else folder / raw).resolve()
-            if path != folder and folder not in path.parents:
-                raise PermissionError("只能取回项目目录里的文件")
+            folder, path = self._resolve(cmd["folder"], cmd.get("path", ""))
             if not path.is_file():
                 raise FileNotFoundError(f"找不到文件：{path}")
-            if path.stat().st_size > 200 * 1024 * 1024:
+            if path.stat().st_size > MAX_OPEN_SIZE:
                 raise ValueError("文件超过 200 MB")
-            file_id = await asyncio.to_thread(self.api.upload, path)
+            file_id = await self._upload(path)
             ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
             await self.emit(chat_id, {"type": "file", "file_id": file_id, "name": path.name, "content_type": ctype,
                                       "path": str(path.relative_to(folder))})
         except Exception as e:  # noqa: BLE001
             await self.emit(chat_id, {"type": "error", "text": f"取回文件失败：{e}"})
+
+    # ------------------------------------------------------------------ 浏览目录 / 打开文件（网页上直接要结果）
+    async def reply(self, cmd: dict) -> None:
+        try:
+            data = await (self.list_dir(cmd) if cmd["op"] == "ls" else self.open_file(cmd))
+        except Exception as e:  # noqa: BLE001
+            data = {"error": str(e) or type(e).__name__}
+        try:
+            await asyncio.to_thread(self.api.web_reply, cmd["reply_id"], data)
+        except Exception:  # noqa: BLE001
+            log.exception("回复网页请求失败")
+
+    async def list_dir(self, cmd: dict) -> dict:
+        folder, path = self._resolve(cmd["folder"], cmd.get("path", ""))
+        if not path.is_dir():
+            raise NotADirectoryError(f"不是目录：{path}")
+
+        def scan() -> list[dict]:
+            out = []
+            with os.scandir(path) as it:
+                for e in it:
+                    if e.name in (".git",):
+                        continue
+                    try:
+                        st = e.stat()
+                        is_dir = e.is_dir()
+                    except OSError:
+                        continue
+                    out.append({"name": e.name, "dir": is_dir, "size": 0 if is_dir else st.st_size, "mtime": st.st_mtime})
+                    if len(out) >= MAX_LS:
+                        break
+            out.sort(key=lambda x: (not x["dir"], x["name"].lower()))
+            return out
+
+        entries = await asyncio.to_thread(scan)
+        rel = "" if path == folder else path.relative_to(folder).as_posix()
+        return {"path": rel, "entries": entries, "truncated": len(entries) >= MAX_LS}
+
+    async def open_file(self, cmd: dict) -> dict:
+        folder, path = self._resolve(cmd["folder"], cmd.get("path", ""))
+        if not path.is_file():
+            raise FileNotFoundError(f"找不到文件：{path.relative_to(folder) if folder in path.parents else path}")
+        size = path.stat().st_size
+        if size > MAX_OPEN_SIZE:
+            raise ValueError("文件超过 200 MB")
+        file_id = await self._upload(path)
+        return {"file_id": file_id, "name": path.name, "size": size, "path": path.relative_to(folder).as_posix(),
+                "content_type": mimetypes.guess_type(path.name)[0] or "application/octet-stream"}
+
+    async def _report_changes(self, chat_id: str, folder: str, snapshot: str, turn_no: int) -> None:
+        """一轮结束：列出这一轮改动的文件，改动过的图片直接传到网页上显示。"""
+        end = await asyncio.to_thread(self.snaps.take, folder, f"chat {chat_id} after turn {turn_no}")
+        changes = await asyncio.to_thread(self.snaps.diff, folder, snapshot, end)
+        if not changes:
+            return
+        base = Path(folder).resolve()
+        files, images = [], 0
+        for status, rel in changes[:300]:
+            item = {"path": rel, "status": status}
+            p = base / rel
+            if status != "D" and p.suffix.lower() in IMAGE_EXT and images < MAX_AUTO_IMAGES:
+                try:
+                    if p.stat().st_size <= MAX_AUTO_IMAGE_SIZE:
+                        item["file_id"] = await self._upload(p)
+                        item["content_type"] = mimetypes.guess_type(p.name)[0] or "image/png"
+                        images += 1
+                except Exception as e:  # noqa: BLE001
+                    log.warning("上传图片 %s 失败：%s", rel, e)
+            files.append(item)
+        await self.emit(chat_id, {"type": "changes", "files": files, "total": len(changes)})
+
+
+def _usage(msg) -> dict:
+    u = msg.usage or {}
+    inp = sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+    return {"input_tokens": inp, "output_tokens": int(u.get("output_tokens") or 0), "cost_usd": msg.total_cost_usd,
+            "turns": msg.num_turns}
